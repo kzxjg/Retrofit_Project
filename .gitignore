@@ -1,0 +1,20 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+
+# Django
+db.sqlite3
+staticfiles/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+.DS_Store

@@ -1,0 +1,7 @@
+asgiref==3.12.1
+Django==6.1.2
+django-ratelimit==4.1.0
+gunicorn==26.2.0
+sqlparse==0.6.0
+psycopg[binary]==3.3.8
+redis==8.1.0

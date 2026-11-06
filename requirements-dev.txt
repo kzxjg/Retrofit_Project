@@ -1,0 +1,4 @@
+# Only for running the tests. Not needed to run the web app.
+-r requirements.txt
+hypothesis==6.170.14
+sortedcontainers==2.4.0

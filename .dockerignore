@@ -1,0 +1,13 @@
+# Send Docker only what the API image needs. Everything else, above all .env
+# and any other secrets, stays out of the build.
+*
+!requirements.txt
+!manage.py
+!gunicorn.conf.py
+!config/
+!recommendations/
+
+**/__pycache__
+**/*.py[cod]
+# Tests are not needed to run the app.
+**/test*.py

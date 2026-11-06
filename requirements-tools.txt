@@ -1,0 +1,5 @@
+# Only for tools/make_zone_areas.py. Not needed to run the web app.
+certifi==2026.10.19
+numpy==2.5.4
+pyproj==3.8.0
+shapely==2.2.0

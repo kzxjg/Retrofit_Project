@@ -1,0 +1,35 @@
+/* Roboto is served from public/Roboto so visitors' browsers never contact a font CDN. */
+@font-face {
+  font-family: 'Roboto';
+  src: url('/Roboto/Roboto-VariableFont_wdth,wght.ttf') format('truetype');
+  font-weight: 100 900;
+  font-stretch: 75% 100%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Roboto';
+  src: url('/Roboto/Roboto-Italic-VariableFont_wdth,wght.ttf') format('truetype');
+  font-weight: 100 900;
+  font-stretch: 75% 100%;
+  font-style: italic;
+  font-display: swap;
+}
+
+:root {
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  color-scheme: light;
+  color: #1b1b1b;
+  background: #eceef1;
+}
+
+body {
+  margin: 0;
+}
+
+h1 {
+  font-size: 2.2rem;
+  margin: 0 0 0.5rem;
+}
