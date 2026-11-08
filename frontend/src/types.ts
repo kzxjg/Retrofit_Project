@@ -1,15 +1,8 @@
-export type FieldType =
-  | 'text'
-  | 'select'
-  | 'radio'
-  | 'number'
-  | 'currency'
-  | 'checklist'
-  | 'multiselect'
-  | 'records'
-  | 'incentives'
+export type FieldType = 'text' | 'select' | 'number' | 'currency' | 'weights'
 
 export type ShowIf = { field: string; equals: string }
+
+export type Criterion = { id: string; label: string; default: number }
 
 export type Field = {
   id: string
@@ -19,45 +12,51 @@ export type Field = {
   options?: string[]
   help?: string
   placeholder?: string
-  placement?: 'top' | 'map' // 'top': the box beside the map; 'map': under the map
+  placement?: 'map' // shown under the map instead of with the other questions
   format?: 'postal_code'
   show_if?: ShowIf
-  unit_kind?: 'area' | 'temperature' | 'power' | 'length'
   integer?: boolean
   min?: number
   max?: number
-  other_text?: boolean
-  max_records?: number
-  year_range?: [number, number]
-  ranges?: { label: string; min: number | null; max: number | null }[] // e.g. which generation a year falls in
-  numeric?: Record<string, number> // a dropdown option that stands for a number (storeys, floor area band)
-  labels_by_unit?: Record<string, string[]> // how each option reads in another unit system, same order as options
-  type_options?: string[] // renovation records: the building elements to choose from
+  criteria?: Criterion[] // weights: the criteria with a slider each
   must_match_postal?: { field: string; zones_by_letter: Record<string, string[]> } // zone ids that fit each postal code letter
-  not_more_than?: { field: string; message: string } // e.g. storeys above ground <= total storeys
 }
 
 export type Section = { id: string; title: string; fields: Field[] }
 
-export type UnitSystem = { area: string; temperature: string; length: string }
+export type Spec = { sections: Section[] }
 
-export type Spec = {
-  unit_field: string
-  unit_systems: Record<string, UnitSystem>
-  sections: Section[]
-}
-
-export type Renovation = { type: string; year: string }
-export type Answer = string | string[] | Renovation[]
+export type Weights = Record<string, number>
+export type Answer = string | Weights
 export type Answers = Record<string, Answer>
 
-export type Incentive = {
+export type ApiError = { field: string; message: string }
+
+export type Package = {
   id: string
   name: string
-  eligibility: string
-  amount: string
-  deadline: string
-  last_verified: string | null
+  tag: string
+  description: string
+  cost: number
+  incentive: number
+  net_cost: number
+  saving_pct: number
+  carbon_t: number
+  embodied_t: number
+  payback_yrs: number
+  resilience: number
+  score: number
+  within_budget: boolean
 }
 
-export type ApiError = { field: string; message: string }
+export type Report = {
+  archetype: { id: string; building_form: string; period: string; confidence: number }
+  baseline: { energy_kwh: number; heating_kwh: number; cooling_kwh: number; carbon_t: number }
+  budget: number
+  weights: Record<string, number>
+  packages: Package[] // best match for the user's priorities first
+}
+
+// How the recommendations step orders and filters the packages (on the page only, not sent).
+export type SortMode = 'personal' | 'cost' | 'savings' | 'carbon' | 'payback'
+export type BudgetFilter = 'within' | 'all'

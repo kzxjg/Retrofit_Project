@@ -14,9 +14,9 @@ import { fileURLToPath } from 'node:url'
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { allFields, buildPayload, fieldIssue, validate } from './formLogic'
+import { allFields, buildPayload, defaultWeights, fieldIssue, initialAnswers, validate } from './formLogic'
 import { optionForZoneId } from './zones'
-import type { Answer, Answers, ApiError, Field, Spec } from './types'
+import type { Answers, ApiError, Field, Report, Spec } from './types'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const PYTHON = process.env.RETROFIT_PYTHON ?? resolve(ROOT, '.venv/bin/python')
@@ -32,54 +32,25 @@ function python(command: 'spec' | 'check', input?: unknown): unknown {
   return JSON.parse(out)
 }
 
-type Verdict = { errors: ApiError[]; package: string | null }
+type Verdict = { errors: ApiError[]; report: Report | null }
 const serverCheck = (payloads: Record<string, unknown>[]) => python('check', payloads) as Verdict[]
 
 // The question types the page knows how to draw (FieldControl.tsx and types.ts).
-const PAGE_TYPES = ['text', 'select', 'radio', 'number', 'currency', 'checklist', 'multiselect', 'records', 'incentives']
+const PAGE_TYPES = ['text', 'select', 'number', 'currency', 'weights']
 
-// Limits in the spec are metric; a typed answer is in the units chosen.
-function inUnits(f: Field, metric: number, imperial: boolean): number {
-  if (!imperial) return metric
-  if (f.unit_kind === 'area') return metric / 0.09290304
-  if (f.unit_kind === 'temperature') return (metric * 9) / 5 + 32
-  if (f.unit_kind === 'length') return metric / 25.4
-  return metric
-}
-
-/** A complete set of answers, typed the way the page stores them (numbers as text, records as text). */
-function sampleAnswers(spec: Spec, units?: string): Answers {
-  const answers: Answers = {}
-  const imperial = Boolean(units?.startsWith('Imperial'))
+/** A complete set of answers, typed the way the page stores them (numbers as text). */
+function sampleAnswers(spec: Spec, mode: 0 | 1 = 0): Answers {
+  const answers: Answers = initialAnswers(spec)
   for (const f of allFields(spec)) {
-    let value: Answer
-    switch (f.type) {
-      case 'select':
-      case 'radio':
-        value = f.options![0]
-        break
-      case 'checklist':
-      case 'multiselect':
-        value = [f.options!.find((o) => o !== 'Other')!]
-        break
-      case 'number':
-      case 'currency':
-        value = String(Math.ceil(inUnits(f, f.min !== undefined && f.min >= 1 ? f.min : 1, imperial)))
-        break
-      case 'records':
-        value = [{ type: f.type_options?.[0] ?? 'Window replacement', year: String(f.year_range![1]) }]
-        break
-      case 'incentives':
-        value = []
-        break
-      default:
-        value = f.format === 'postal_code' ? 'N9A 1A1' : 'text'
-    }
-    answers[f.id] = value
+    if (f.type === 'select') answers[f.id] = f.options![0]
+    else if (f.type === 'number' || f.type === 'currency') answers[f.id] = String(f.min !== undefined && f.min >= 1 ? f.min : 1)
+    else if (f.type === 'weights') answers[f.id] = defaultWeights(f)
+    else if (f.format === 'postal_code') answers[f.id] = 'N9A 1A1'
   }
   const zone = allFields(spec).find((f) => f.id === 'zone')!
   answers.zone = optionForZoneId(zone.options!, zone.must_match_postal!.zones_by_letter.N[0])!
-  if (units) answers[spec.unit_field] = units
+  const mode_ = allFields(spec).find((f) => f.id === 'preference_mode')!
+  answers.preference_mode = mode_.options![mode]
   return answers
 }
 
@@ -87,8 +58,10 @@ const serverFieldErrors = (verdict: Verdict, id: string) => verdict.errors.filte
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe.skipIf(!HAVE_PYTHON)('the page and the real server agree', () => {
-  const spec = HAVE_PYTHON ? (python('spec') as Spec) : ({ sections: [] } as unknown as Spec)
+// Each test starts Python and Django, which takes several seconds (more under WSL on a Windows
+// drive), so the default 5 s timeout is too short.
+describe.skipIf(!HAVE_PYTHON)('the page and the real server agree', { timeout: 60_000 }, () => {
+  const spec = HAVE_PYTHON ? (python('spec') as Spec) : ({ sections: [] } as Spec)
   const fields = allFields(spec)
 
   it('uses only question types the page can draw', () => {
@@ -96,18 +69,14 @@ describe.skipIf(!HAVE_PYTHON)('the page and the real server agree', () => {
     expect(unknown).toEqual([])
   })
 
-  it('draws every question of the real form', async () => {
+  it('has the two sections of questions the page puts in steps 1 and 2', () => {
+    expect(spec.sections.map((s) => s.id)).toEqual(['home', 'priorities'])
+  })
+
+  it('draws every question of the home profile, and the map', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => spec })))
     render(<App />)
-    await screen.findByRole('button', { name: /get my recommendation/i })
-    const text = document.body.textContent ?? ''
-    const missing = fields.filter((f) => !f.show_if && !text.includes(f.label)).map((f) => f.id)
-    expect(missing).toEqual([])
-    for (const section of spec.sections) {
-      if (section.fields.some((f) => !f.placement && !f.show_if)) {
-        expect(screen.getByRole('heading', { name: section.title })).toBeTruthy()
-      }
-    }
+    for (const f of spec.sections[0].fields) expect(await screen.findByLabelText(f.label)).toBeTruthy()
   })
 
   it('has follow-up questions whose conditions can actually be met', () => {
@@ -118,64 +87,58 @@ describe.skipIf(!HAVE_PYTHON)('the page and the real server agree', () => {
     }
   })
 
-  it('links questions only to questions that exist', () => {
-    for (const f of fields) {
-      if (f.not_more_than) expect(fields.some((x) => x.id === f.not_more_than!.field), f.id).toBe(true)
-      if (f.must_match_postal) expect(fields.some((x) => x.id === f.must_match_postal!.field), f.id).toBe(true)
-      expect(spec.unit_systems).toBeDefined()
-    }
-    expect(fields.some((f) => f.id === spec.unit_field)).toBe(true)
-  })
-
-  it.each([['metric', 0], ['imperial', 1]])(
-    'sends a complete %s form in a shape the server accepts and gets a package back',
-    (_, unitIndex) => {
-      const units = Object.keys(spec.unit_systems)[unitIndex]
-      const answers = sampleAnswers(spec, units)
+  it.each([['simple', 0], ['advanced', 1]])(
+    'sends a complete %s form in a shape the server accepts and gets a report back',
+    (_, mode) => {
+      const answers = sampleAnswers(spec, mode as 0 | 1)
       expect(validate(spec, answers)).toEqual([])
       const [verdict] = serverCheck([buildPayload(spec, answers)])
       expect(verdict.errors).toEqual([])
-      expect(verdict.package).toEqual(expect.any(String))
+      expect(verdict.report?.packages.length).toBeGreaterThan(0)
+      for (const key of ['cost', 'incentive', 'net_cost', 'saving_pct', 'score', 'within_budget']) {
+        expect(verdict.report!.packages[0]).toHaveProperty(key)
+      }
     },
   )
 
   it('sends only questions the server knows', () => {
-    const answers = sampleAnswers(spec)
-    for (const f of fields) if (f.show_if) answers[f.show_if.field] = f.show_if.equals // show every follow-up
-    const payload = buildPayload(spec, answers)
-    const [verdict] = serverCheck([payload])
-    expect(verdict.errors.filter((e) => /unknown field/i.test(e.message))).toEqual([])
+    for (const mode of [0, 1] as const) {
+      const [verdict] = serverCheck([buildPayload(spec, sampleAnswers(spec, mode))])
+      expect(verdict.errors.filter((e) => /unknown field/i.test(e.message))).toEqual([])
+    }
   })
 
-  it.each([['metric', 0], ['imperial', 1]])('agrees with the server on the limits of every typed number in %s', (_, unitIndex) => {
-    const units = Object.keys(spec.unit_systems)[unitIndex]
-    const imperial = units.startsWith('Imperial')
-    const base = sampleAnswers(spec, units)
+  it('agrees with the server on the limits of every typed number', () => {
+    const base = sampleAnswers(spec)
     const cases: { field: Field; typed: string }[] = []
     for (const f of fields.filter((x) => x.type === 'number' || x.type === 'currency')) {
       const step = f.integer ? 1 : 0.5
-      // the limits as the user would type them: rounded inwards to one decimal (whole numbers if asked)
-      const scale = f.integer ? 1 : 10
       const values = new Set<number>([1])
-      if (f.min !== undefined) {
-        const lo = Math.ceil(inUnits(f, f.min, imperial) * scale) / scale
-        ;[lo, lo - step].forEach((v) => values.add(v))
-      }
-      if (f.max !== undefined) {
-        const hi = Math.floor(inUnits(f, f.max, imperial) * scale) / scale
-        ;[hi, hi + step].forEach((v) => values.add(v))
-      }
+      if (f.min !== undefined) [f.min, f.min - step].forEach((v) => values.add(v))
+      if (f.max !== undefined) [f.max, f.max + step].forEach((v) => values.add(v))
       for (const v of values) cases.push({ field: f, typed: String(v) })
     }
-    const payloads = cases.map(({ field, typed }) => buildPayload(spec, { ...base, [field.id]: typed }))
-    const verdicts = serverCheck(payloads)
+    const verdicts = serverCheck(cases.map(({ field, typed }) => buildPayload(spec, { ...base, [field.id]: typed })))
     const disagreements = cases.flatMap(({ field, typed }, i) => {
       const answers = { ...base, [field.id]: typed }
-      const pageOk = fieldIssue(field, typed, spec, answers) === null
+      const pageOk = fieldIssue(field, typed, answers) === null
       const serverOk = serverFieldErrors(verdicts[i], field.id).length === 0
       return pageOk === serverOk ? [] : [`${field.id}=${typed}: page ${pageOk ? 'accepts' : 'refuses'}, server ${serverOk ? 'accepts' : 'refuses'}`]
     })
     expect(disagreements).toEqual([])
+  })
+
+  it('agrees with the server on which weights are acceptable', () => {
+    const weights = fields.find((f) => f.type === 'weights')!
+    const base = sampleAnswers(spec, 1)
+    const ids = weights.criteria!.map((c) => c.id)
+    const all = (n: number) => Object.fromEntries(ids.map((id) => [id, n]))
+    const cases = [all(0), all(100), { ...all(0), [ids[0]]: 1 }, { ...all(10), [ids[0]]: 101 }, { ...all(10), [ids[0]]: -1 }]
+    const verdicts = serverCheck(cases.map((w) => buildPayload(spec, { ...base, [weights.id]: w })))
+    cases.forEach((w, i) => {
+      const pageOk = fieldIssue(weights, w, base) === null
+      expect(serverFieldErrors(verdicts[i], weights.id).length === 0, JSON.stringify(w)).toBe(pageOk)
+    })
   })
 
   it('agrees with the server on which climate zones fit each postal code letter', () => {
@@ -186,35 +149,15 @@ describe.skipIf(!HAVE_PYTHON)('the page and the real server agree', () => {
     const verdicts = serverCheck(cases.map((c) => buildPayload(spec, { ...base, postal_code: c.postal, zone: c.option })))
     const disagreements = cases.flatMap((c, i) => {
       const answers = { ...base, postal_code: c.postal, zone: c.option }
-      const pageOk = fieldIssue(zone, c.option, spec, answers) === null
+      const pageOk = fieldIssue(zone, c.option, answers) === null
       const serverOk = serverFieldErrors(verdicts[i], 'zone').length === 0
       return pageOk === serverOk ? [] : [`${c.postal} + ${c.option.split(':')[0]}: page ${pageOk}, server ${serverOk}`]
     })
     expect(disagreements).toEqual([])
   })
 
-  it('agrees with the server on renovations dated before the building', () => {
-    const base = sampleAnswers(spec)
-    const records = fields.find((f) => f.type === 'records')!
-    // a year built inside the range renovations can be dated in, so only the order is tested
-    const built = Math.max(Number(base.year_built), records.year_range![0] + 5)
-    const cases = [built - 1, built, built + 1].map((year) => ({
-      ...base,
-      year_built: String(built),
-      [records.id]: [{ type: records.type_options?.[0] ?? 'Window replacement', year: String(year) }],
-    }))
-    const verdicts = serverCheck(cases.map((a) => buildPayload(spec, a)))
-    cases.forEach((answers, i) => {
-      const pageOk = fieldIssue(records, answers[records.id], spec, answers) === null
-      expect(serverFieldErrors(verdicts[i], records.id).length === 0, `year ${built - 1 + i}`).toBe(pageOk)
-    })
-  })
-
-  it("gives renovation and year-built limits that end at this year", () => {
-    const thisYear = new Date().getFullYear()
-    const records = fields.find((f) => f.type === 'records')!
-    expect(records.year_range![1]).toBe(thisYear)
-    expect(fields.find((f) => f.id === 'year_built')!.max).toBe(thisYear)
+  it('gives a year-built limit that ends at this year', () => {
+    expect(fields.find((f) => f.id === 'year_built')!.max).toBe(new Date().getFullYear())
   })
 })
 

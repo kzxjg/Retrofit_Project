@@ -1,5 +1,5 @@
 import { zoneIdFromOption } from './zones'
-import type { Answer, Answers, ApiError, Field, Renovation, Spec } from './types'
+import type { Answer, Answers, ApiError, BudgetFilter, Field, Package, SortMode, Spec, Weights } from './types'
 
 // Canada Post rules: no D, F, I, O, Q, U anywhere; no W or Z as the first letter
 export const POSTAL_RE = /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d$/i
@@ -13,54 +13,30 @@ export function isVisible(field: Field, answers: Answers): boolean {
   return !cond || answers[cond.field] === cond.equals
 }
 
-export function asStrings(value: Answer | undefined): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
-}
-
-export function asRecords(value: Answer | undefined): Renovation[] {
-  return Array.isArray(value) ? value.filter((v): v is Renovation => typeof v === 'object') : []
+export function asWeights(value: Answer | undefined): Weights {
+  return value && typeof value === 'object' ? value : {}
 }
 
 export function isEmpty(value: Answer | undefined): boolean {
-  return value === undefined || value === '' || (Array.isArray(value) && value.length === 0)
+  if (value === undefined || value === '') return true
+  return typeof value === 'object' && Object.keys(value).length === 0
 }
 
-/** A dropdown option as the user should read it: some options (floor area) are shown in the chosen units. */
-export function optionLabel(field: Field, spec: Spec, answers: Answers, option: string): string {
-  const chosen = answers[spec.unit_field]
-  const labels = typeof chosen === 'string' ? field.labels_by_unit?.[chosen] : undefined
-  const index = (field.options ?? []).indexOf(option)
-  return labels && index >= 0 && labels[index] ? labels[index] : option
-}
-
-/** The number a typed or chosen answer stands for (a dropdown option may stand for one), or null. */
-function numberOf(field: Field | undefined, value: Answer | undefined): number | null {
-  if (typeof value !== 'string' || value.trim() === '') return null
-  const mapped = field?.numeric?.[value]
-  const n = mapped !== undefined ? mapped : Number(value.trim())
-  return Number.isFinite(n) ? n : null
-}
-
-/** For a typed number with named ranges (the year built), the name of the range it falls in. */
-export function rangeLabel(field: Field, value: Answer | undefined): string | null {
-  if (!field.ranges || typeof value !== 'string' || value.trim() === '') return null
-  const n = Number(value.trim())
-  if (!Number.isInteger(n)) return null
-  const hit = field.ranges.find((r) => (r.min === null || n >= r.min) && (r.max === null || n <= r.max))
-  return hit ? hit.label : null
-}
-
-/** The unit text shown next to a number, from the chosen unit system. */
-export function unitSuffix(field: Field, spec: Spec, answers: Answers): string {
-  if (field.type === 'currency') return 'CAD'
-  if (field.unit_kind === 'power') return 'kW'
-  if (field.unit_kind === 'area' || field.unit_kind === 'temperature' || field.unit_kind === 'length') {
-    const chosen = answers[spec.unit_field]
-    const systems = spec.unit_systems
-    const key = typeof chosen === 'string' && chosen in systems ? chosen : Object.keys(systems)[0]
-    return systems[key][field.unit_kind]
+/** The starting answers: every dropdown without a "Select…" choice and every slider at its default. */
+export function initialAnswers(spec: Spec): Answers {
+  const answers: Answers = {}
+  for (const field of allFields(spec)) {
+    if (field.type === 'weights') answers[field.id] = defaultWeights(field)
+    // a question that others depend on (the preference setting) always has an answer
+    else if (field.type === 'select' && allFields(spec).some((f) => f.show_if?.field === field.id)) {
+      answers[field.id] = field.options?.[0] ?? ''
+    }
   }
-  return ''
+  return answers
+}
+
+export function defaultWeights(field: Field): Weights {
+  return Object.fromEntries((field.criteria ?? []).map((c) => [c.id, c.default]))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -70,29 +46,6 @@ export function unitSuffix(field: Field, spec: Spec, answers: Answers): string {
 /** A problem with one answer. `early` problems cannot be fixed by typing more, so they show at
  *  once; the others (too short, too small) wait until the user leaves the box. */
 export type FieldIssue = { message: string; early: boolean }
-
-const AREA_M2_PER_FT2 = 0.09290304 // the same factor the server uses
-
-export function isImperial(spec: Spec, answers: Answers): boolean {
-  const chosen = answers[spec.unit_field]
-  return typeof chosen === 'string' && chosen.startsWith('Imperial')
-}
-
-/** The limits in the spec are in metric. Convert a typed value to metric to compare. */
-function toMetric(field: Field, value: number, imperial: boolean): number {
-  if (imperial && field.unit_kind === 'area') return value * AREA_M2_PER_FT2
-  if (imperial && field.unit_kind === 'temperature') return ((value - 32) * 5) / 9
-  if (imperial && field.unit_kind === 'length') return value * 25.4 // inches to millimetres
-  return value
-}
-
-/** ...and convert a limit to the units the user chose, so the message speaks their units. */
-function fromMetric(field: Field, value: number, imperial: boolean): number {
-  if (imperial && field.unit_kind === 'area') return value / AREA_M2_PER_FT2
-  if (imperial && field.unit_kind === 'temperature') return (value * 9) / 5 + 32
-  if (imperial && field.unit_kind === 'length') return value / 25.4
-  return value
-}
 
 function tidy(n: number, grouping: boolean): string {
   return n.toLocaleString('en-CA', { maximumFractionDigits: 1, useGrouping: grouping })
@@ -121,7 +74,7 @@ export function postalIssue(raw: string): FieldIssue | null {
   return null
 }
 
-function numberIssue(field: Field, value: string, spec: Spec, answers: Answers): FieldIssue | null {
+function numberIssue(field: Field, value: string): FieldIssue | null {
   const text = value.trim()
   if (text === '') return null
   if (!/^-?\d*\.?\d*$/.test(text)) return { message: 'Enter a number.', early: true }
@@ -131,35 +84,40 @@ function numberIssue(field: Field, value: string, spec: Spec, answers: Answers):
   // a bare trailing dot is fine while typing; any digit after the dot (1985.0) is not a whole number
   if (field.integer && (/\.\d/.test(text) || !Number.isInteger(n))) return { message: 'Enter a whole number.', early: true }
 
-  const imperial = isImperial(spec, answers)
-  const metric = toMetric(field, n, imperial)
   const lo = field.min
   const hi = field.max
-  const tooHigh = hi !== undefined && metric > hi
-  const tooLow = lo !== undefined && metric < lo
+  const tooHigh = hi !== undefined && n > hi
+  const tooLow = lo !== undefined && n < lo
   if (tooHigh || tooLow) {
-    const unit = unitSuffix(field, spec, answers)
     const money = field.type === 'currency'
-    const show = (limit: number, round: (x: number) => number) => {
-      const shown = round(fromMetric(field, limit, imperial) * 10) / 10
-      return money ? `$${tidy(shown, true)}` : tidy(shown, false)
-    }
-    const low = lo !== undefined ? show(lo, Math.ceil) : null
-    const high = hi !== undefined ? show(hi, Math.floor) : null
+    const show = (limit: number) => (money ? `$${tidy(limit, true)}` : tidy(limit, false))
+    const low = lo !== undefined ? show(lo) : null
+    const high = hi !== undefined ? show(hi) : null
     const what = money ? 'an amount' : field.integer ? 'a whole number' : 'a value'
-    const tail = unit ? ` ${unit}` : ''
     const message =
       low !== null && high !== null
-        ? `Enter ${what} between ${low} and ${high}${tail}.`
+        ? `Enter ${what} between ${low} and ${high}.`
         : low !== null
-          ? `Enter ${what} of at least ${low}${tail}.`
-          : `Enter ${what} of at most ${high}${tail}.`
+          ? `Enter ${what} of at least ${low}.`
+          : `Enter ${what} of at most ${high}.`
     if (tooHigh) return { message, early: true } // typing more digits only makes it bigger
     // too small: wait, unless it cannot grow any more (negative, or already as long as the maximum)
-    const longest = hi !== undefined ? integerDigits(fromMetric(field, hi, imperial)) : Infinity
+    const longest = hi !== undefined ? integerDigits(hi) : Infinity
     return { message, early: n < 0 || integerDigits(n) >= longest }
   }
 
+  return null
+}
+
+function weightsIssue(field: Field, value: Answer | undefined): FieldIssue | null {
+  const weights = asWeights(value)
+  const lo = field.min ?? 0
+  const hi = field.max ?? 100
+  const ok = (field.criteria ?? []).every((c) => Number.isInteger(weights[c.id]) && weights[c.id] >= lo && weights[c.id] <= hi)
+  if (!ok) return { message: `Give each criterion a whole number from ${lo} to ${hi}.`, early: true }
+  if (Object.values(weights).every((w) => w === 0)) {
+    return { message: 'Give at least one criterion a weight above 0.', early: true }
+  }
   return null
 }
 
@@ -173,40 +131,20 @@ export function zoneIdsForPostalCode(field: Field, answers: Answers): string[] |
 }
 
 /** What is wrong with this answer right now, if anything. An empty answer is not an issue here:
- *  a missing required answer is reported separately, once the user tries to submit. */
-export function fieldIssue(field: Field, value: Answer | undefined, spec: Spec, answers: Answers): FieldIssue | null {
+ *  a missing required answer is reported separately, once the user tries to move on. */
+export function fieldIssue(field: Field, value: Answer | undefined, answers: Answers): FieldIssue | null {
   if (isEmpty(value)) return null
-  const rule = field.not_more_than
-  if (rule) {
-    const mine = numberOf(field, value)
-    const other = numberOf(allFields(spec).find((f) => f.id === rule.field), answers[rule.field])
-    if (mine !== null && other !== null && mine > other) return { message: rule.message, early: false }
-  }
-  if (field.format === 'postal_code' && typeof value === 'string') return postalIssue(value)
-  if (field.must_match_postal && typeof value === 'string') {
+  if (field.type === 'weights') return weightsIssue(field, value)
+  if (typeof value !== 'string') return { message: 'Enter an answer.', early: true }
+  if (field.format === 'postal_code') return postalIssue(value)
+  if (field.must_match_postal) {
     const allowed = zoneIdsForPostalCode(field, answers)
     const id = zoneIdFromOption(value)
     if (allowed && id && !allowed.includes(id)) {
       return { message: 'That climate zone does not occur where your postal code is. Choose a zone for your area.', early: true }
     }
   }
-  if ((field.type === 'number' || field.type === 'currency') && typeof value === 'string') {
-    return numberIssue(field, value, spec, answers)
-  }
-  if (field.type === 'records') {
-    const records = asRecords(value)
-    for (let i = 0; i < records.length; i++) {
-      const hasType = records[i].type.trim() !== ''
-      const hasYear = records[i].year !== ''
-      if (hasType !== hasYear) {
-        return { message: `Renovation ${i + 1}: enter both a type and a year, or remove it.`, early: false }
-      }
-      const built = Number(answers.year_built)
-      if (hasYear && Number.isInteger(built) && Number(records[i].year) < built) {
-        return { message: `Renovation ${i + 1} is dated before the building was built (${built}).`, early: true }
-      }
-    }
-  }
+  if (field.type === 'number' || field.type === 'currency') return numberIssue(field, value)
   return null
 }
 
@@ -227,17 +165,18 @@ export function sanitizeInput(field: Field, raw: string): string {
   return raw
 }
 
-/** Everything that still needs attention before the form can be sent. */
-export function validate(spec: Spec, answers: Answers): ApiError[] {
+/** Everything that still needs attention before the answers can be sent (in the given questions,
+ *  or the whole form). */
+export function validate(spec: Spec, answers: Answers, fields: Field[] = allFields(spec)): ApiError[] {
   const problems: ApiError[] = []
-  for (const field of allFields(spec)) {
+  for (const field of fields) {
     if (!isVisible(field, answers)) continue
     const value = answers[field.id]
     if (isEmpty(value)) {
       if (field.required) problems.push({ field: field.id, message: `${field.label} is required.` })
       continue
     }
-    const issue = fieldIssue(field, value, spec, answers)
+    const issue = fieldIssue(field, value, answers)
     if (issue) problems.push({ field: field.id, message: issue.message })
   }
   return problems
@@ -251,49 +190,40 @@ export function buildPayload(spec: Spec, answers: Answers): Record<string, unkno
     const value = answers[field.id]
     if (isEmpty(value)) continue
 
-    if (field.type === 'number' || field.type === 'currency') {
-      payload[field.id] = Number(String(value).trim())
-    } else if (field.type === 'records') {
-      const records = asRecords(value)
-        .filter((r) => r.type.trim() !== '' && r.year !== '')
-        .map((r) => ({ type: r.type.trim(), year: Number(r.year) }))
-      if (records.length) payload[field.id] = records
-    } else if (field.type === 'checklist' || field.type === 'multiselect' || field.type === 'incentives') {
-      payload[field.id] = asStrings(value)
-    } else if (typeof value === 'string') {
+    if (field.type === 'weights') {
+      const weights = asWeights(value)
+      payload[field.id] = Object.fromEntries((field.criteria ?? []).map((c) => [c.id, weights[c.id]]))
+    } else if (typeof value !== 'string') {
+      continue
+    } else if (field.type === 'number' || field.type === 'currency') {
+      payload[field.id] = Number(value.trim())
+    } else {
       payload[field.id] = field.format === 'postal_code' ? value.trim().toUpperCase() : value.trim()
-    }
-
-    if (field.other_text && asStrings(value).includes('Other')) {
-      const other = answers[`${field.id}_other`]
-      if (typeof other === 'string' && other.trim()) payload[`${field.id}_other`] = other.trim()
     }
   }
   return payload
 }
 
-/** How an answer reads in the review step. */
-export function displayValue(field: Field, value: Answer | undefined, spec: Spec, answers: Answers): string {
-  if (field.type === 'records') {
-    return asRecords(value)
-      .filter((r) => r.type.trim() !== '' && r.year !== '')
-      .map((r) => `${r.type.trim()} (${r.year})`)
-      .join('; ')
+/** "1980–1989" for a typed year, or null while it is not a usable year. */
+export function decadeLabel(value: Answer | undefined): string | null {
+  if (typeof value !== 'string' || !/^\d{4}$/.test(value.trim())) return null
+  const start = Math.floor(Number(value) / 10) * 10
+  return `${start}–${start + 9}`
+}
+
+export function money(n: number): string {
+  return `$${Math.round(n).toLocaleString('en-CA')}`
+}
+
+/** The packages in the order and selection the user asked for. The server sends them best match first. */
+export function arrangePackages(packages: Package[], sort: SortMode, filter: BudgetFilter): Package[] {
+  const shown = filter === 'within' ? packages.filter((p) => p.within_budget) : [...packages]
+  const by: Record<SortMode, (a: Package, b: Package) => number> = {
+    personal: (a, b) => b.score - a.score,
+    cost: (a, b) => a.cost - b.cost,
+    savings: (a, b) => b.saving_pct - a.saving_pct,
+    carbon: (a, b) => b.carbon_t - a.carbon_t,
+    payback: (a, b) => a.payback_yrs - b.payback_yrs,
   }
-  if (Array.isArray(value)) {
-    const parts = asStrings(value)
-    const other = answers[`${field.id}_other`]
-    if (field.other_text && parts.includes('Other') && typeof other === 'string' && other.trim()) {
-      return parts.map((p) => (p === 'Other' ? `Other: ${other.trim()}` : p)).join(', ')
-    }
-    return parts.join(', ')
-  }
-  const text = typeof value === 'string' ? value : ''
-  if (!text) return ''
-  if (field.type === 'select') return optionLabel(field, spec, answers, text)
-  if (field.type === 'currency') return `$${text} CAD`
-  const range = rangeLabel(field, value)
-  if (range) return `${text} (${range})`
-  const suffix = field.type === 'number' ? unitSuffix(field, spec, answers) : ''
-  return suffix ? `${text} ${suffix}` : text
+  return shown.sort(by[sort])
 }

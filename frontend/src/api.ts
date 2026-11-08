@@ -1,4 +1,4 @@
-import type { ApiError, Incentive, Spec } from './types'
+import type { ApiError, Report, Spec } from './types'
 
 // Where the Django server is. Leave it empty and the page calls the server at its own address, which
 // is how the development server (it forwards /api to Django) and a site served from one domain work.
@@ -9,13 +9,6 @@ export async function fetchSpec(): Promise<Spec> {
   const response = await fetch(`${API_URL}/api/form-spec`)
   if (!response.ok) throw new Error(`Server returned ${response.status}`)
   return (await response.json()) as Spec
-}
-
-export async function fetchIncentives(zone: string): Promise<Incentive[]> {
-  const response = await fetch(`${API_URL}/api/incentives?zone=${encodeURIComponent(zone)}`)
-  if (!response.ok) throw new Error(`Server returned ${response.status}`)
-  const data = (await response.json()) as { programs: Incentive[] }
-  return data.programs
 }
 
 // A problem the user can act on, with the server's own wording, e.g. "Too many requests. Please
@@ -43,7 +36,7 @@ async function firstMessage(response: Response): Promise<string | null> {
 }
 
 export type SubmitOutcome =
-  | { ok: true; recommendation: string }
+  | { ok: true; report: Report }
   | { ok: false; errors: ApiError[] }
 
 export async function submitAnswers(answers: Record<string, unknown>): Promise<SubmitOutcome> {
@@ -53,8 +46,7 @@ export async function submitAnswers(answers: Record<string, unknown>): Promise<S
     body: JSON.stringify({ answers }),
   })
   if (response.ok) {
-    const data = (await response.json()) as { package: string }
-    return { ok: true, recommendation: data.package }
+    return { ok: true, report: (await response.json()) as Report }
   }
   if (response.status === 422) {
     try {

@@ -8,10 +8,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from django_ratelimit.core import is_ratelimited
 
-from .baseline import match_baseline
-from .formspec import ZONE_BY_OPTION, public_spec, validate
-from .incentives import incentives_for
-from .logic import recommend_package
+from .formspec import public_spec, validate
+from .logic import build_report
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +43,6 @@ def health(request):
 @require_GET
 def form_spec(request):
     return JsonResponse(public_spec())
-
-
-@require_GET
-def incentives(request):
-    selected = ZONE_BY_OPTION.get(request.GET.get("zone", ""))
-    if not selected:
-        return JsonResponse({"programs": []})
-    return JsonResponse({"programs": incentives_for(selected["id"])})
 
 
 def over_rate_limit(request):
@@ -95,7 +85,7 @@ def recommend(request):
             {"errors": [{"field": "answers", "message": "Request is too large."}]},
             status=413,
         )
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         payload = None
     answers = payload.get("answers") if isinstance(payload, dict) else None
     if not isinstance(answers, dict):
@@ -108,14 +98,13 @@ def recommend(request):
     if errors:
         return JsonResponse({"errors": errors}, status=422)
 
-    package = recommend_package(clean)
-    baseline = match_baseline(clean)
+    report = build_report(clean)
     # Log only derived results, never the answers themselves (postal code etc.).
     logger.info(
-        "recommendation package=%r baseline=%s confidence=%.2f",
-        package, baseline.archetype_id, baseline.confidence,
+        "recommendation top=%r baseline=%s confidence=%.2f",
+        report["packages"][0]["id"], report["archetype"]["id"], report["archetype"]["confidence"],
     )
-    return JsonResponse({"package": package})
+    return JsonResponse(report)
 
 
 

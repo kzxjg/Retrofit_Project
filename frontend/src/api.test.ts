@@ -4,7 +4,7 @@ function mockFetch() {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     void url
     void init
-    return { ok: true, status: 200, json: async () => ({ programs: [], sections: [] }) }
+    return { ok: true, status: 200, json: async () => ({ sections: [] }) }
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -27,13 +27,8 @@ describe('where the page sends its requests', () => {
     const fetchMock = mockFetch()
     const api = await loadApi()
     await api.fetchSpec()
-    await api.fetchIncentives('Zone 5: a b')
     await api.submitAnswers({ a: 1 })
-    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      '/api/form-spec',
-      '/api/incentives?zone=Zone%205%3A%20a%20b',
-      '/api/recommend',
-    ])
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/form-spec', '/api/recommend'])
   })
 
   it('goes to the server address when one is set, with or without a trailing slash', async () => {
@@ -58,6 +53,11 @@ describe('answers from the server', () => {
     const api = await loadApi()
     return api.submitAnswers({ postal_code: 'N9A 1A1' })
   }
+
+  it('hands back the report on a 200', async () => {
+    const report = { packages: [{ id: 'basic' }] }
+    expect(await submitWith({ ok: true, status: 200, json: async () => report })).toEqual({ ok: true, report })
+  })
 
   it('turns a 422 into its list of errors', async () => {
     const errors = [{ field: 'zone', message: 'No.' }]
@@ -106,7 +106,7 @@ describe('answers from the server', () => {
   })
 
   it('sends no CSRF token: the API does not use one', async () => {
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ package: 'x' }) }))
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ packages: [] }) }))
     vi.stubGlobal('fetch', fetchMock)
     const api = await loadApi()
     document.cookie = 'csrftoken=abc%20123'

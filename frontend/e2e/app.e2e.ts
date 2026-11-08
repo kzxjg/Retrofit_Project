@@ -12,15 +12,7 @@ type Field = {
   placement?: string
   show_if?: unknown
 }
-type Spec = { sections: { fields: Field[] }[] }
-
-const PACKAGES = [
-  'No Upgrade Recommended',
-  'Equipment Electrification',
-  'Basic Envelope + Equipment Electrification',
-  'Current Code Envelope + Equipment Electrification',
-  'Beyond Code Envelope + Equipment Electrification',
-]
+type Spec = { sections: { id: string; fields: Field[] }[] }
 
 // Every problem the browser reports: script errors, console errors, failed loads and anything the
 // Content-Security-Policy blocked.
@@ -49,14 +41,14 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-async function realSpec(page: Page): Promise<Field[]> {
+async function realSpec(page: Page): Promise<Spec> {
   const response = await page.request.get('/api/form-spec')
   expect(response.ok()).toBe(true)
-  return ((await response.json()) as Spec).sections.flatMap((s) => s.fields)
+  return (await response.json()) as Spec
 }
 
-/** Answers every required question through the page, the way a visitor would. */
-async function fillRequired(page: Page, fields: Field[]) {
+/** Answers every required, always-shown question of one step through the page, the way a visitor would. */
+async function fillSection(page: Page, fields: Field[]) {
   for (const f of fields.filter((x) => x.required && !x.show_if)) {
     const box = page.locator(`#f-${f.id}`)
     switch (f.type) {
@@ -65,7 +57,7 @@ async function fillRequired(page: Page, fields: Field[]) {
         break
       case 'number':
       case 'currency':
-        await box.fill(String(f.id === 'year_built' ? 1985 : (f.min ?? 1)))
+        await box.fill(String(f.id === 'year_built' ? 1985 : f.id === 'budget' ? 30000 : (f.min ?? 1)))
         break
       case 'select':
         if (f.id === 'zone') {
@@ -74,27 +66,30 @@ async function fillRequired(page: Page, fields: Field[]) {
           await box.selectOption({ label: f.options![0] })
         }
         break
-      case 'radio':
-        await page.getByRole('group', { name: f.label }).getByRole('radio').first().check()
-        break
-      case 'checklist':
-      case 'multiselect':
-        await page.getByRole('group', { name: f.label }).getByRole('checkbox').first().check()
-        break
       default:
-        throw new Error(`fillRequired does not know how to answer a required ${f.type} question (${f.id})`)
+        throw new Error(`fillSection does not know how to answer a required ${f.type} question (${f.id})`)
     }
   }
+}
+
+/** Steps 1 and 2 filled in, ready to apply (simple mode: its follow-up question answered too). */
+async function fillBothSteps(page: Page) {
+  const spec = await realSpec(page)
+  await fillSection(page, spec.sections[0].fields)
+  await page.getByRole('button', { name: /continue to priorities/i }).click()
+  await fillSection(page, spec.sections[1].fields)
+  const priority = spec.sections[1].fields.find((f) => f.id === 'priority')!
+  await page.locator('#f-priority').selectOption({ label: priority.options![0] })
 }
 
 test('the built page loads with everything it needs and nothing blocked', async ({ page }) => {
   const problems = watchForProblems(page)
   await page.goto('/')
-  await expect(page.getByRole('button', { name: /get my recommendation/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /continue to priorities/i })).toBeVisible()
 
-  const fields = await realSpec(page)
-  for (const f of fields.filter((x) => !x.show_if)) {
-    await expect(page.getByText(f.label, { exact: false }).first(), f.id).toBeAttached()
+  const spec = await realSpec(page)
+  for (const f of spec.sections[0].fields) {
+    await expect(page.getByLabel(f.label, { exact: true }), f.id).toBeVisible()
   }
 
   // logo, map and font all actually arrived
@@ -144,46 +139,61 @@ test('the API answers with its own deny-all policy and security headers', async 
   expect(headers['x-content-type-options']).toBe('nosniff')
 })
 
-test('a visitor fills in the real form and gets the real server’s recommendation', async ({ page }) => {
+test('a visitor goes through the steps and gets the real server’s report', async ({ page }) => {
   const problems = watchForProblems(page)
   await page.goto('/')
-  const fields = await realSpec(page)
-  await fillRequired(page, fields)
-  await expect(page.locator('#f-postal_code')).toHaveValue('N9A 1A1')
+  await fillBothSteps(page)
 
   const [response] = await Promise.all([
     page.waitForResponse((r) => r.url().endsWith('/api/recommend')),
-    page.getByRole('button', { name: /get my recommendation/i }).click(),
+    page.getByRole('button', { name: /apply preferences/i }).click(),
   ])
   expect(response.status()).toBe(200)
   const sent = response.request().postDataJSON() as { answers: Record<string, unknown> }
   expect(sent.answers.postal_code).toBe('N9A 1A1')
   expect(sent.answers.year_built).toBe(1985)
+  expect(sent.answers).not.toHaveProperty('weights') // simple mode
 
-  const { package: pkg } = (await response.json()) as { package: string }
-  expect(PACKAGES).toContain(pkg)
-  await expect(page.locator('.pg-package')).toHaveText(pkg)
+  const report = (await response.json()) as { baseline: { energy_kwh: number }; packages: { name: string; within_budget: boolean }[] }
+  await expect(page.getByRole('heading', { name: /baseline energy performance/i })).toBeVisible()
+  await expect(page.getByText(report.baseline.energy_kwh.toLocaleString('en-CA'))).toBeVisible()
+
+  await page.getByRole('button', { name: /view retrofit options/i }).click()
+  await page.getByLabel('Budget filter').selectOption('all')
+  await expect(page.locator('.pg-package h3').first()).toHaveText(`1. ${report.packages[0].name}`)
+  await page.locator('.pg-package').first().getByRole('button', { name: 'View this package' }).click()
+  await expect(page.getByRole('heading', { name: /results, climate resilience/i })).toBeVisible()
+
   expect(problems).toEqual([])
   expect(await cspViolations(page)).toEqual([])
 })
 
-test('the recommendation follows the answers', async ({ page }) => {
-  // Scored by recommendations/logic.py: age, glazing, unknown insulation (left unanswered here)
-  // and drafty doors add up; an efficient all-electric home needs nothing.
-  const recommend = async (year: string, windows: string, fuel: string, cooling: string) => {
+test('the ranking follows the priorities', async ({ page }) => {
+  const topFor = async (priority: string) => {
     await page.goto('/')
-    await fillRequired(page, await realSpec(page))
-    await page.locator('#f-year_built').fill(year)
-    await page.locator('#f-window_type').selectOption({ label: windows })
-    await page.locator('#f-heating_fuel').selectOption({ label: fuel })
-    await page.locator('#f-cooling_system').selectOption({ label: cooling })
-    await page.getByRole('button', { name: /get my recommendation/i }).click()
-    return page.locator('.pg-package')
+    await fillBothSteps(page)
+    await page.locator('#f-priority').selectOption({ label: priority })
+    await page.getByRole('button', { name: /apply preferences/i }).click()
+    await page.getByRole('button', { name: /view retrofit options/i }).click()
+    await page.getByLabel('Budget filter').selectOption('all')
+    return page.locator('.pg-package h3').first()
   }
-  await expect(await recommend('1920', 'Single glazing', 'Natural gas', 'Central air conditioner'))
-    .toHaveText('Beyond Code Envelope + Equipment Electrification')
-  await expect(await recommend('2022', 'Triple glazing', 'Electricity', 'Heat pump'))
-    .toHaveText('No Upgrade Recommended')
+  await expect(await topFor('Lowest upfront cost')).toHaveText('1. Targeted insulation & air sealing')
+  await expect(await topFor('Maximum energy savings')).toHaveText('1. Whole-home coordinated package')
+})
+
+test('advanced mode sends the slider weights', async ({ page }) => {
+  await page.goto('/')
+  await fillBothSteps(page)
+  await page.locator('#f-preference_mode').selectOption({ index: 1 })
+  await page.getByLabel('Payback').fill('90')
+  const [response] = await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith('/api/recommend')),
+    page.getByRole('button', { name: /apply preferences/i }).click(),
+  ])
+  expect(response.status()).toBe(200)
+  const sent = response.request().postDataJSON() as { answers: { weights: Record<string, number> } }
+  expect(sent.answers.weights.payback).toBe(90)
 })
 
 /** Clicks a zone on the map with the real mouse, at a point where that zone is what the visitor sees. */
@@ -214,39 +224,28 @@ test('clicking a zone on the map chooses it', async ({ page }) => {
   }
 })
 
-test('a zone clicked on the map that does not fit the postal code is reported and not sent', async ({ page }) => {
+test('a zone clicked on the map that does not fit the postal code is reported and blocks the next step', async ({ page }) => {
   await page.goto('/')
-  await fillRequired(page, await realSpec(page))
+  await fillSection(page, (await realSpec(page)).sections[0].fields)
   await page.locator('#f-postal_code').fill('C1A 1A1') // Prince Edward Island: never zone 8
   await page.locator('.cm-svg').scrollIntoViewIfNeeded()
   await clickZone(page, 'zone8')
   await expect(page.getByText(/does not occur where your postal code is/i).first()).toBeVisible()
-
-  const recommend: string[] = []
-  page.on('request', (r) => {
-    if (r.url().endsWith('/api/recommend')) recommend.push(r.url())
-  })
-  await page.getByRole('button', { name: /get my recommendation/i }).click()
+  await page.getByRole('button', { name: /continue to priorities/i }).click()
   await expect(page.locator('#f-zone')).toBeFocused()
-  expect(recommend).toEqual([])
 })
 
-test('an incomplete form is not sent, and the visitor is taken to the first problem', async ({ page }) => {
+test('an incomplete home profile does not continue, and the visitor is taken to the first problem', async ({ page }) => {
   await page.goto('/')
-  const recommend: string[] = []
-  page.on('request', (r) => {
-    if (r.url().endsWith('/api/recommend')) recommend.push(r.url())
-  })
-  await page.getByRole('button', { name: /get my recommendation/i }).click()
+  await page.getByRole('button', { name: /continue to priorities/i }).click()
   await expect(page.locator('#f-postal_code')).toBeFocused()
-  await expect(page.getByText('Postal code is required.').first()).toBeVisible()
-  expect(recommend).toEqual([])
+  await expect(page.getByText('Postal code / location is required.').first()).toBeVisible()
 })
 
 test('the visitor is told when the server cannot be reached', async ({ page }) => {
   await page.goto('/')
-  await fillRequired(page, await realSpec(page))
+  await fillBothSteps(page)
   await page.route('**/api/recommend', (route) => route.abort('connectionrefused'))
-  await page.getByRole('button', { name: /get my recommendation/i }).click()
+  await page.getByRole('button', { name: /apply preferences/i }).click()
   await expect(page.getByRole('alert')).toContainText('Could not get a recommendation')
 })

@@ -1,186 +1,208 @@
-"""Tests for what the tool actually recommends (logic.py) and which modelled house
-it compares the home to (baseline.py), including the exact score boundaries."""
+"""Tests for the report the tool produces (logic.py) and which modelled house it compares the home
+to (baseline.py): weights, package ranking, budget flags and archetype matching."""
 
 from django.test import SimpleTestCase
 
 from .baseline import ARCHETYPES, WEIGHTS, match_baseline
-from .formspec import YEAR_OPTIONS
-from .logic import envelope_score, recommend_package
+from .formspec import (
+    ADVANCED_MODE, BUILDING_FORMS, CRITERIA_IDS, NOT_SURE, PRIORITY_OPTIONS, SECONDARY_OPTIONS,
+    SIMPLE_MODE, YEAR_OPTIONS,
+)
+from .logic import (
+    PACKAGES, PRIORITY_WEIGHTS, REFERENCE_AREA_M2, SECONDARY_CRITERION, SECONDARY_SHARE, build_report,
+    criterion_weights, score,
+)
 
 PRE_1941, GEN_1, GEN_2, GEN_3, GEN_4, GEN_5 = YEAR_OPTIONS
 
-NO_UPGRADE = "No Upgrade Recommended"
-ELECTRIFY = "Equipment Electrification"
-BASIC = "Basic Envelope + Equipment Electrification"
-CURRENT_CODE = "Current Code Envelope + Equipment Electrification"
-BEYOND_CODE = "Beyond Code Envelope + Equipment Electrification"
 
-
-def home(**answers):
-    """A home that scores 0: new, triple glazed, insulation known, no drafts, gas heated."""
+def answers(**changes):
+    """Validated answers, as formspec.validate() hands them on."""
     base = {
-        "year_of_construction": GEN_5, "window_type": "Triple glazing",
-        "insulation_type": "Fibreglass", "door_drafts": "No",
-        "heating_fuel": "Natural gas", "cooling_system": "Central air conditioner",
+        "postal_code": "N9A 1A1", "year_built": 1985, "year_of_construction": GEN_1,
+        "floor_area": REFERENCE_AREA_M2, "building_form": "Detached house",
+        "zone": "Zone 5", "zone_id": "zone5", "budget": 30000,
+        "preference_mode": SIMPLE_MODE, "priority": "Balanced outcome",
     }
-    return {**base, **answers}
+    return {**base, **changes}
 
 
-ALL_ELECTRIC = {"heating_fuel": "Electricity", "cooling_system": "Heat pump"}
+def advanced(**weights):
+    w = {c: 0 for c in CRITERIA_IDS}
+    w.update(weights)
+    return answers(preference_mode=ADVANCED_MODE, weights=w)
 
 
-class EnvelopeScoreTests(SimpleTestCase):
-    def test_points_for_each_age_of_house(self):
-        for year, points in zip(YEAR_OPTIONS, [3, 2, 1, 0, 0, 0]):
-            with self.subTest(year=year):
-                self.assertEqual(envelope_score(home(year_of_construction=year)), points)
+class CriterionWeightTests(SimpleTestCase):
+    def test_weights_always_add_up_to_one(self):
+        cases = [answers(priority=p) for p in PRIORITY_OPTIONS]
+        cases += [answers(priority=p, secondary_priority=s) for p in PRIORITY_OPTIONS for s in SECONDARY_OPTIONS]
+        cases += [advanced(payback=1), advanced(**{c: 100 for c in CRITERIA_IDS})]
+        for a in cases:
+            with self.subTest(a=(a.get("priority"), a.get("secondary_priority"), a.get("weights"))):
+                w = criterion_weights(a)
+                self.assertEqual(list(w), CRITERIA_IDS)
+                self.assertAlmostEqual(sum(w.values()), 1)
+                self.assertTrue(all(v >= 0 for v in w.values()))
 
-    def test_points_for_each_window_type(self):
-        for window, points in {"Single glazing": 2, "Double glazing": 1, "Triple glazing": 0, "Unknown": 1}.items():
-            with self.subTest(window=window):
-                self.assertEqual(envelope_score(home(window_type=window)), points)
+    def test_each_simple_priority_leans_on_its_own_criterion(self):
+        leans = {
+            "Lowest upfront cost": "initial_cost", "Maximum energy savings": "energy_savings",
+            "Lowest carbon emissions": "operational_carbon", "Shortest payback period": "payback",
+            "Future climate resilience": "resilience",
+        }
+        for priority, criterion in leans.items():
+            with self.subTest(priority=priority):
+                w = criterion_weights(answers(priority=priority))
+                self.assertEqual(max(w, key=w.get), criterion)
 
-    def test_unknown_insulation_and_drafty_doors_add_a_point_each(self):
-        self.assertEqual(envelope_score(home(insulation_type="Unknown")), 1)
-        self.assertEqual(envelope_score(home(door_drafts="Yes")), 1)
-        self.assertEqual(envelope_score(home(door_drafts="Unknown")), 0)
+    def test_a_second_priority_adds_weight_to_its_criterion(self):
+        plain = criterion_weights(answers())
+        leaned = criterion_weights(answers(secondary_priority="Long-term performance"))
+        self.assertGreater(leaned["resilience"], plain["resilience"])
+        self.assertLess(leaned["initial_cost"], plain["initial_cost"])
 
-    def test_a_question_left_unanswered(self):
-        # insulation is optional; leaving it out counts the same as answering "Unknown"
-        no_insulation = home()
-        del no_insulation["insulation_type"]
-        self.assertEqual(envelope_score(no_insulation), 1)
-        # an age or window type the table does not know counts as the middle value, 1
-        self.assertEqual(envelope_score(home(year_of_construction=None)), 1)
-        self.assertEqual(envelope_score(home(window_type=None)), 1)
-
-    def test_lowest_and_highest_possible_scores(self):
-        self.assertEqual(envelope_score(home()), 0)
-        worst = home(year_of_construction=PRE_1941, window_type="Single glazing",
-                     insulation_type="Unknown", door_drafts="Yes")
-        self.assertEqual(envelope_score(worst), 7)
-
-
-class RecommendPackageTests(SimpleTestCase):
-    # one home for every score from 0 to 7, so each boundary is tried from both sides
-    HOME_FOR_SCORE = {
-        0: home(),
-        1: home(window_type="Double glazing"),
-        2: home(window_type="Single glazing"),
-        3: home(year_of_construction=GEN_2, window_type="Single glazing"),
-        4: home(year_of_construction=GEN_1, window_type="Single glazing"),
-        5: home(year_of_construction=PRE_1941, window_type="Single glazing"),
-        6: home(year_of_construction=PRE_1941, window_type="Single glazing", door_drafts="Yes"),
-        7: home(year_of_construction=PRE_1941, window_type="Single glazing", door_drafts="Yes",
-                insulation_type="Unknown"),
+    # Written out by hand, not read from logic.py: SECONDARY_CRITERION pairs the options with
+    # criteria by list position, so reordering either list would swap them without this.
+    SECONDARY_LEANS = {
+        "Long-term performance": "resilience",
+        "Energy savings": "energy_savings",
+        "Lower carbon emissions": "operational_carbon",
+        "Lower lifecycle cost": "payback",
+        "Short payback": "payback",
     }
 
-    def test_the_homes_used_here_have_the_scores_they_claim(self):
-        for score, answers in self.HOME_FOR_SCORE.items():
-            self.assertEqual(envelope_score(answers), score)
+    def test_every_second_priority_leans_on_its_own_criterion_by_its_share(self):
+        self.assertEqual(set(self.SECONDARY_LEANS), set(SECONDARY_OPTIONS))
+        for priority in PRIORITY_OPTIONS:
+            plain = criterion_weights(answers(priority=priority))
+            for secondary, criterion in self.SECONDARY_LEANS.items():
+                with self.subTest(priority=priority, secondary=secondary):
+                    leaned = criterion_weights(answers(priority=priority, secondary_priority=secondary))
+                    for c in CRITERIA_IDS:
+                        expected = plain[c] * (1 - SECONDARY_SHARE) + (SECONDARY_SHARE if c == criterion else 0)
+                        self.assertAlmostEqual(leaned[c], expected)
 
-    def test_package_at_every_score(self):
-        expected = {0: ELECTRIFY, 1: ELECTRIFY, 2: BASIC, 3: BASIC,
-                    4: CURRENT_CODE, 5: CURRENT_CODE, 6: BEYOND_CODE, 7: BEYOND_CODE}
-        for score, package in expected.items():
-            with self.subTest(score=score):
-                self.assertEqual(recommend_package(self.HOME_FOR_SCORE[score]), package)
+    def test_every_option_has_its_weights_and_none_are_left_over(self):
+        # zip() would silently drop an option added without a matching entry.
+        self.assertEqual(list(PRIORITY_WEIGHTS), PRIORITY_OPTIONS)
+        self.assertTrue(all(len(w) == len(CRITERIA_IDS) for w in PRIORITY_WEIGHTS.values()))
+        self.assertEqual(list(SECONDARY_CRITERION), SECONDARY_OPTIONS)
+        self.assertTrue(set(SECONDARY_CRITERION.values()) <= set(CRITERIA_IDS))
 
-    def test_an_efficient_all_electric_home_needs_no_upgrade(self):
-        for score in (0, 1):
-            for cooling in ("Heat pump", "Ductless mini-split", "None"):
-                with self.subTest(score=score, cooling=cooling):
-                    answers = {**self.HOME_FOR_SCORE[score], "heating_fuel": "Electricity", "cooling_system": cooling}
-                    self.assertEqual(recommend_package(answers), NO_UPGRADE)
-
-    def test_all_electric_only_matters_for_an_efficient_envelope(self):
-        # from score 2 up the envelope decides, whatever the equipment
-        for score in range(2, 8):
-            with self.subTest(score=score):
+    def test_no_second_priority_changes_nothing(self):
+        for priority in PRIORITY_OPTIONS:
+            with self.subTest(priority=priority):
                 self.assertEqual(
-                    recommend_package({**self.HOME_FOR_SCORE[score], **ALL_ELECTRIC}),
-                    recommend_package(self.HOME_FOR_SCORE[score]),
+                    criterion_weights(answers(priority=priority, secondary_priority=None)),
+                    criterion_weights(answers(priority=priority)),
                 )
 
-    def test_electric_heat_with_other_cooling_is_not_all_electric(self):
-        for cooling in ("Central air conditioner", "Window air conditioner", "Portable air conditioner",
-                        "Other", "Unknown", None):
-            with self.subTest(cooling=cooling):
-                answers = home(heating_fuel="Electricity", cooling_system=cooling)
-                self.assertEqual(recommend_package(answers), ELECTRIFY)
+    def test_advanced_weights_are_normalised(self):
+        w = criterion_weights(advanced(payback=30, resilience=10))
+        self.assertAlmostEqual(w["payback"], 0.75)
+        self.assertAlmostEqual(w["resilience"], 0.25)
+        self.assertEqual(w["initial_cost"], 0)
 
-    def test_heat_pump_cooling_with_non_electric_heat_is_not_all_electric(self):
-        self.assertEqual(recommend_package(home(heating_fuel="Natural gas", cooling_system="Heat pump")), ELECTRIFY)
-        self.assertEqual(recommend_package(home(heating_fuel="Unknown", cooling_system="Heat pump")), ELECTRIFY)
+    def test_advanced_mode_ignores_a_leftover_simple_priority(self):
+        a = advanced(payback=1)
+        a["priority"] = "Lowest upfront cost"
+        self.assertAlmostEqual(criterion_weights(a)["payback"], 1)
 
-    def test_every_package_is_one_of_the_five_known_ones(self):
-        known = {NO_UPGRADE, ELECTRIFY, BASIC, CURRENT_CODE, BEYOND_CODE}
-        for answers in self.HOME_FOR_SCORE.values():
-            for equipment in ({}, ALL_ELECTRIC):
-                self.assertIn(recommend_package({**answers, **equipment}), known)
+
+class RankingTests(SimpleTestCase):
+    def ids(self, report):
+        return [p["id"] for p in report["packages"]]
+
+    def test_packages_are_sorted_best_score_first(self):
+        report = build_report(answers())
+        scores = [p["score"] for p in report["packages"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual(sorted(self.ids(report)), sorted(p["id"] for p in PACKAGES))
+
+    def test_caring_only_about_cost_puts_the_cheapest_package_first(self):
+        cheapest = min(PACKAGES, key=lambda p: p["cost"])["id"]
+        self.assertEqual(self.ids(build_report(advanced(initial_cost=100)))[0], cheapest)
+
+    def test_caring_only_about_savings_puts_the_biggest_saver_first(self):
+        best = max(PACKAGES, key=lambda p: p["saving_pct"])["id"]
+        self.assertEqual(self.ids(build_report(advanced(energy_savings=100)))[0], best)
+
+    def test_caring_only_about_payback_puts_the_quickest_payback_first(self):
+        best = min(PACKAGES, key=lambda p: p["payback_yrs"])["id"]
+        self.assertEqual(self.ids(build_report(advanced(payback=100)))[0], best)
+
+    def test_a_score_is_the_weighted_criterion_values(self):
+        only_resilience = {c: (1 if c == "resilience" else 0) for c in CRITERIA_IDS}
+        for p in PACKAGES:
+            self.assertAlmostEqual(score(p, only_resilience), p["resilience"] / 100)
+
+
+class ReportTests(SimpleTestCase):
+    def test_costs_scale_with_floor_area(self):
+        small = build_report(answers(floor_area=REFERENCE_AREA_M2 / 2))
+        full = build_report(answers())
+        by_id = lambda r: {p["id"]: p for p in r["packages"]}
+        for pid, p in by_id(full).items():
+            self.assertEqual(p["cost"], next(x["cost"] for x in PACKAGES if x["id"] == pid))
+            self.assertAlmostEqual(by_id(small)[pid]["cost"], p["cost"] / 2, delta=1)
+
+    def test_incentive_and_net_cost_add_up(self):
+        for p in build_report(answers())["packages"]:
+            self.assertEqual(p["cost"] - p["incentive"], p["net_cost"])
+            self.assertGreaterEqual(p["incentive"], 0)
+
+    def test_within_budget_is_cost_at_or_under_the_budget(self):
+        cost = next(p["cost"] for p in PACKAGES if p["id"] == "basic")
+        for budget, expected in ((cost - 1, False), (cost, True), (cost + 1, True)):
+            with self.subTest(budget=budget):
+                report = build_report(answers(budget=budget))
+                basic = next(p for p in report["packages"] if p["id"] == "basic")
+                self.assertIs(basic["within_budget"], expected)
+        self.assertFalse(any(p["within_budget"] for p in build_report(answers(budget=0))["packages"]))
+
+    def test_baseline_grows_with_floor_area(self):
+        a = build_report(answers(floor_area=100))["baseline"]
+        b = build_report(answers(floor_area=200))["baseline"]
+        self.assertEqual(b["energy_kwh"], 2 * a["energy_kwh"])
+        self.assertLess(a["heating_kwh"] + a["cooling_kwh"], a["energy_kwh"])
+
+    def test_the_report_names_the_archetype_and_echoes_the_budget(self):
+        report = build_report(answers())
+        self.assertEqual(report["archetype"]["id"], "detached_gen1")
+        self.assertEqual(report["archetype"]["confidence"], 1.0)
+        self.assertEqual(report["budget"], 30000)
 
 
 class MatchBaselineTests(SimpleTestCase):
-    """These follow WEIGHTS and ARCHETYPES, whatever they hold, so they keep
-    working when the placeholder weights are replaced with real ones."""
-
     def test_an_exact_copy_of_an_archetype_matches_it_fully(self):
         for archetype in ARCHETYPES:
             with self.subTest(archetype=archetype["id"]):
-                match = match_baseline(dict(archetype["profile"]))
+                match = match_baseline(archetype["profile"])
                 self.assertEqual(match.archetype_id, archetype["id"])
-                self.assertEqual(match.idf_file, archetype["idf_file"])
                 self.assertEqual(match.confidence, 1.0)
                 self.assertEqual(match.mismatched, [])
 
-    def test_unanswered_questions_count_as_half_a_match(self):
-        match = match_baseline({})
-        self.assertEqual(match.confidence, 0.5)
-        self.assertEqual(match.mismatched, [])
-
-    def test_unknown_counts_as_half_unless_the_archetype_also_says_unknown(self):
-        # Current rule: an "Unknown" answer fully matches an archetype whose own profile
-        # says "Unknown", so such archetypes win ties among people who answered "Unknown".
+    def test_unanswered_or_not_sure_counts_as_half_a_match(self):
         total = sum(WEIGHTS.values())
-        unknown = {field: "Unknown" for field in WEIGHTS}
-        best = max(
-            sum(w if a["profile"][f] == "Unknown" else w / 2 for f, w in WEIGHTS.items())
-            for a in ARCHETYPES
-        )
-        match = match_baseline(unknown)
-        self.assertEqual(match.confidence, round(best / total, 2))
-        self.assertEqual(match.mismatched, [])
-
-    def test_a_tie_goes_to_the_first_archetype_in_the_list(self):
-        self.assertEqual(match_baseline({}).archetype_id, ARCHETYPES[0]["id"])
+        for form in (None, NOT_SURE):
+            with self.subTest(building_form=form):
+                match = match_baseline({"building_form": form, "year_of_construction": GEN_1})
+                self.assertEqual(match.confidence, round((WEIGHTS["building_form"] / 2 + WEIGHTS["year_of_construction"]) / total, 2))
 
     def test_a_wrong_answer_is_listed_and_lowers_the_confidence(self):
-        archetype = ARCHETYPES[0]
-        field = max(WEIGHTS, key=WEIGHTS.get)
-        answers = {**archetype["profile"], field: "Something else"}
-        match = match_baseline(answers)
-        if match.archetype_id == archetype["id"]:
-            self.assertEqual(match.mismatched, [field])
-            self.assertAlmostEqual(match.confidence, round(1 - WEIGHTS[field] / sum(WEIGHTS.values()), 2))
-        else:
-            self.assertLess(match.confidence, 1.0)
-
-    def test_confidence_is_always_between_0_and_1(self):
-        profiles = [a["profile"] for a in ARCHETYPES]
-        mixes = [{}, {f: "nonsense" for f in WEIGHTS}]
-        mixes += [{**p, **{f: "nonsense" for f in list(WEIGHTS)[: i]}} for i, p in enumerate(profiles)]
-        for answers in mixes:
-            match = match_baseline(answers)
-            self.assertGreaterEqual(match.confidence, 0.0)
-            self.assertLessEqual(match.confidence, 1.0)
-            self.assertTrue(set(match.mismatched) <= set(WEIGHTS))
+        match = match_baseline({"building_form": "Detached house", "year_of_construction": GEN_5})
+        self.assertIn("year_of_construction", match.mismatched)
+        self.assertLess(match.confidence, 1)
 
     def test_answers_matching_nothing_still_pick_an_archetype(self):
-        match = match_baseline({f: "nonsense" for f in WEIGHTS})
-        self.assertEqual(match.confidence, 0.0)
-        self.assertEqual(sorted(match.mismatched), sorted(WEIGHTS))
+        match = match_baseline({})
         self.assertIn(match.archetype_id, [a["id"] for a in ARCHETYPES])
+        self.assertTrue(0 <= match.confidence <= 1)
 
-    def test_every_archetype_describes_every_weighted_question(self):
+    def test_every_archetype_uses_real_answers_for_every_weighted_question(self):
         for archetype in ARCHETYPES:
             self.assertEqual(set(archetype["profile"]), set(WEIGHTS), archetype["id"])
+            self.assertIn(archetype["profile"]["building_form"], BUILDING_FORMS)
+            self.assertNotEqual(archetype["profile"]["building_form"], NOT_SURE)
+            self.assertIn(archetype["profile"]["year_of_construction"], YEAR_OPTIONS)

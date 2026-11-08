@@ -129,11 +129,11 @@ class LoadBalancerTests(SimpleTestCase):
         self.assertEqual(self.by_name["spec over https"]["status"], 200)
         r = self.by_name["recommend"]
         self.assertEqual(r["status"], 200, r["body"])
-        self.assertIn("package", json.loads(r["body"]))
+        self.assertTrue(r["body"].startswith('{"archetype"'), r["body"])
 
     def test_each_recommendation_is_logged_without_the_answers(self):
         log = self.out["log"]
-        self.assertIn("INFO recommendations.views recommendation package=", log)
+        self.assertIn("INFO recommendations.views recommendation top=", log)
         self.assertNotIn("N9A", log)  # the sample postal code
 
 
@@ -158,7 +158,7 @@ class BeforeThereIsADomainTests(SimpleTestCase):
             self.request("/api/recommend", method="post", HTTP_CLOUDFRONT_FORWARDED_PROTO="https"),
         ], **self.ENV)
         self.assertEqual([r["status"] for r in out["results"]], [200, 200], out["results"][-1]["body"])
-        self.assertIn("package", json.loads(out["results"][1]["body"]))
+        self.assertTrue(out["results"][1]["body"].startswith('{"archetype"'))
 
     def test_without_cloudfronts_header_the_request_is_sent_to_https(self):
         out = run_production([self.request("/api/form-spec")], **self.ENV)
@@ -189,7 +189,7 @@ class ProductionLoggingTests(SimpleTestCase):
     def test_a_crash_is_logged_with_its_traceback(self):
         out = run_production([{**get("/api/recommend", https=True, method="post"),
                                "body": json.dumps({"answers": valid_answers()}),
-                               "break": "recommendations.views.recommend_package"}])
+                               "break": "recommendations.views.build_report"}])
         self.assertEqual(out["results"][0]["status"], 500)
         self.assertIn("ERROR django.request Internal Server Error: /api/recommend", out["log"])
         self.assertIn("Traceback", out["log"])
@@ -199,7 +199,7 @@ class ProductionLoggingTests(SimpleTestCase):
         out = run_production([{**get("/api/recommend", https=True, method="post"),
                                "body": json.dumps({"answers": valid_answers()})}], DJANGO_LOG_LEVEL="warning")
         self.assertEqual(out["results"][0]["status"], 200)
-        self.assertNotIn("recommendation package=", out["log"])
+        self.assertNotIn("recommendation top=", out["log"])
 
     def test_an_unknown_log_level_stops_startup(self):
         with self.assertRaisesMessage(AssertionError, "DJANGO_LOG_LEVEL"):
@@ -265,7 +265,7 @@ class CacheOutageTests(TestCase):
             response = self.client.post("/api/recommend", data={"answers": valid_answers()},
                                         content_type="application/json")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("package", response.json())
+        self.assertIn("packages", response.json())
         self.assertIn("Rate-limit cache unavailable", logs.output[0])
 
     def test_bad_answers_are_still_refused_during_an_outage(self):

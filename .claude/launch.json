@@ -12,6 +12,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "preview", "--", "--port", "4173", "--strictPort"],
       "port": 4173
+    },
+    {
+      "name": "django-wsl",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": ["-e", "bash", "-c", "cd /mnt/c/Users/user/Documents/Retrofit_Project && DJANGO_DEBUG=1 exec .venv/bin/python manage.py runserver 127.0.0.1:8000 --noreload"],
+      "port": 8000
+    },
+    {
+      "name": "frontend-preview-wsl",
+      "runtimeExecutable": "wsl.exe",
+      "runtimeArgs": ["-e", "bash", "-c", "source ~/.nvm/nvm.sh && cd /mnt/c/Users/user/Documents/Retrofit_Project/frontend && exec npx vite preview --host 127.0.0.1 --port 4173 --strictPort"],
+      "port": 4173
     }
   ]
 }

@@ -1,8 +1,5 @@
 """Behavior tests. They build their sample answers from the questionnaire in
-formspec.py, so adding, removing or rewording a question needs no edits here."""
-
-
-
+formspec.py, so adding, removing or rewording a question needs few edits here."""
 
 import json
 
@@ -10,7 +7,10 @@ from django.conf import settings
 from django.core.cache import cache
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 
-from .formspec import FIELD_BY_ID, FIELDS, IMPERIAL, METRIC, POSTAL_LETTERS, PROVINCE_ZONES, STOREY_OPTIONS, ZONES, ZONE_OPTIONS, zones_for_postal_letter
+from .formspec import (
+    ADVANCED_MODE, CRITERIA, FIELD_BY_ID, FIELDS, POSTAL_LETTERS, PROVINCE_ZONES, SIMPLE_MODE, ZONES,
+    ZONE_OPTIONS, zones_for_postal_letter,
+)
 
 
 # Production settings refuse to load without a PostgreSQL configuration. Loading
@@ -20,28 +20,33 @@ PRODUCTION_DB = {"DJANGO_DB_NAME": "retrofit", "DJANGO_DB_USER": "app", "DJANGO_
 # A key that passes the strength check (50+ characters, many distinct ones). Test use only.
 STRONG_KEY = "test-only-9f2c7a1e4b8d0c3f6a5e2d1b7c9e0f4a8b3d6c2e1f5a7b9d"
 
+DEFAULT_WEIGHTS = {c["id"]: c["default"] for c in CRITERIA}
+
 
 def sample_value(field):
     kind = field["type"]
-    if kind in ("select", "radio"):
+    if kind == "select":
         return field["options"][0]
-    if kind in ("checklist", "multiselect"):
-        return [field["options"][0]]
     if kind in ("number", "currency"):
         low = field.get("min", 1)
         return low if low >= 1 else 1
-    if kind == "records":
-        kind_of_work = field["type_options"][0] if field.get("type_options") else "Window replacement"
-        return [{"type": kind_of_work, "year": field["year_range"][1]}]
-    if kind == "incentives":
-        return []
+    if kind == "weights":
+        return dict(DEFAULT_WEIGHTS)
     return "N9A 1A1" if field.get("format") == "postal_code" else "text"
 
 
 def valid_answers():
-    answers = {field["id"]: sample_value(field) for field in FIELDS}
+    """A complete submission in simple mode (the advanced weights are left out: they are hidden)."""
+    answers = {field["id"]: sample_value(field) for field in FIELDS if not field.get("show_if")}
     answers["zone"] = ZONE_OPTIONS[1]  # Zone 5 occurs in Ontario, where the sample postal code N9A is
+    answers["preference_mode"] = SIMPLE_MODE
+    answers["priority"] = FIELD_BY_ID["priority"]["options"][0]
     return answers
+
+
+def advanced_answers(**weights):
+    answers = {k: v for k, v in valid_answers().items() if k not in ("priority", "secondary_priority")}
+    return {**answers, "preference_mode": ADVANCED_MODE, "weights": {**DEFAULT_WEIGHTS, **weights}}
 
 
 def required_ids(answers):
@@ -96,55 +101,74 @@ class ApiTests(TestCase):
             for field in section["fields"]:
                 self.assertTrue(field["label"])
                 self.assertIn("required", field)
-                if field["type"] in ("select", "radio", "checklist", "multiselect"):
+                if field["type"] == "select":
                     self.assertGreaterEqual(len(field["options"]), 2, field["id"])
 
-    def test_unit_systems_match_the_units_question(self):
+    def test_the_form_asks_exactly_the_questions_of_the_two_input_steps(self):
         spec = self.client.get("/api/form-spec").json()
-        units = next(f for f in FIELDS if f["id"] == spec["unit_field"])
-        self.assertEqual(sorted(units["options"]), sorted(spec["unit_systems"]))
+        self.assertEqual(
+            {s["id"]: [f["id"] for f in s["fields"]] for s in spec["sections"]},
+            {
+                "home": ["postal_code", "year_built", "floor_area", "building_form", "zone"],
+                "priorities": ["budget", "preference_mode", "priority", "secondary_priority", "weights"],
+            },
+        )
 
     def test_placed_questions_are_ones_the_page_knows_how_to_place(self):
         spec = self.client.get("/api/form-spec").json()
         fields = [f for section in spec["sections"] for f in section["fields"]]
-        for field in fields:
-            self.assertIn(field.get("placement"), (None, "top", "map"), field["id"])
-            # a question shown outside the sections is always visible, never behind another answer
-            if field.get("placement"):
-                self.assertNotIn("show_if", field, field["id"])
-        # the climate zone sits under the map
-        self.assertEqual([f["id"] for f in fields if f.get("placement") == "map"], ["zone"])
+        # the climate zone sits under the map, and is always visible
+        self.assertEqual([f["id"] for f in fields if f.get("placement")], ["zone"])
+        self.assertNotIn("show_if", FIELD_BY_ID["zone"])
 
-    # ---- valid submissions ----
-    def test_valid_answers_return_a_package(self):
+    def test_every_text_question_is_one_the_server_knows_how_to_check(self):
+        # validate() only knows postal codes. A new free-text question needs its own check there
+        # (and a length limit) before it is added, or its answers would go unchecked.
+        for field in FIELDS:
+            if field["type"] == "text":
+                self.assertEqual(field.get("format"), "postal_code", field["id"])
+
+    def test_follow_up_questions_wait_for_an_answer_that_is_offered(self):
+        for field in FIELDS:
+            cond = field.get("show_if")
+            if cond:
+                self.assertIn(cond["equals"], FIELD_BY_ID[cond["field"]]["options"], field["id"])
+
+    # ---- valid submissions and the report ----
+    def test_valid_answers_return_a_report(self):
         response = self.post(valid_answers())
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["package"])
+        report = response.json()
+        self.assertEqual(set(report), {"archetype", "baseline", "budget", "weights", "packages"})
+        self.assertEqual(len(report["packages"]), 4)
+        self.assertTrue(report["archetype"]["id"])
+
+    def test_advanced_weights_return_a_report(self):
+        self.assertEqual(self.post(advanced_answers()).status_code, 200)
 
     def test_only_required_questions_are_enough(self):
         answers = {k: v for k, v in valid_answers().items() if k in required_ids(valid_answers())}
         self.assertEqual(self.post(answers).status_code, 200)
+        answers = {k: v for k, v in advanced_answers().items() if k in required_ids(advanced_answers())}
+        self.assertEqual(self.post(answers).status_code, 200)
 
     # ---- required and unknown input ----
     def test_every_required_question_is_required(self):
-        for field_id in required_ids(valid_answers()):
-            with self.subTest(missing=field_id):
-                answers = valid_answers()
-                del answers[field_id]
-                response = self.post(answers)
-                self.assertEqual(response.status_code, 422)
-                self.assertIn(field_id, self.error_fields(response))
+        for base in (valid_answers(), advanced_answers()):
+            for field_id in required_ids(base):
+                with self.subTest(mode=base["preference_mode"], missing=field_id):
+                    answers = dict(base)
+                    del answers[field_id]
+                    response = self.post(answers)
+                    self.assertEqual(response.status_code, 422)
+                    self.assertIn(field_id, self.error_fields(response))
 
     def test_unknown_options_are_rejected(self):
         for field in FIELDS:
-            if field["type"] in ("select", "radio"):
-                bad = "not a real option"
-            elif field["type"] in ("checklist", "multiselect"):
-                bad = ["not a real option"]
-            else:
+            if field["type"] != "select":
                 continue
             with self.subTest(question=field["id"]):
-                response = self.post({**valid_answers(), field["id"]: bad})
+                response = self.post({**valid_answers(), field["id"]: "not a real option"})
                 self.assertEqual(response.status_code, 422)
                 self.assertIn(field["id"], self.error_fields(response))
 
@@ -153,9 +177,15 @@ class ApiTests(TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("not_a_question", self.error_fields(response))
 
+    def test_questions_that_were_removed_are_unknown(self):
+        for old in ("preferred_units", "storeys", "house_type", "renovation_history", "subsidies",
+                    "window_type", "primary_heating", "objectives", "solar_existing"):
+            with self.subTest(question=old):
+                self.assertIn(old, self.error_fields(self.post({**valid_answers(), old: "x"})))
+
     def test_errors_do_not_reflect_odd_input(self):
         odd_key = "<img src=x onerror=alert(1)>"
-        response = self.post({**valid_answers(), odd_key: "x", "wall_materials": ["<script>"]})
+        response = self.post({**valid_answers(), odd_key: "x", "building_form": "<script>"})
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("<", response.content.decode())
         self.assertIn("answers", self.error_fields(response))
@@ -167,22 +197,22 @@ class ApiTests(TestCase):
                 self.assertEqual(response.status_code, 422)
 
     def test_numbers_too_big_for_a_float_are_rejected_not_crashed_on(self):
-        year = next(f for f in FIELDS if f["id"] == "renovation_history")["year_range"][1]
         for answers in (
             {"year_built": 10**400},
-            {"energy_bill_winter": -(10**400)},
-            {"renovation_history": [{"type": "Walls", "year": 10**400}]},
+            {"budget": -(10**400)},
+            {"floor_area": 10**400},
         ):
             with self.subTest(field=next(iter(answers))):
                 response = self.post({**valid_answers(), **answers})
                 self.assertEqual(response.status_code, 422)
                 self.assertIn(next(iter(answers)), self.error_fields(response))
-        self.assertEqual(self.post({**valid_answers(), "renovation_history": [{"type": "Walls", "year": year}]}).status_code, 200)
+        response = self.post(advanced_answers(payback=10**400))
+        self.assertIn("weights", self.error_fields(response))
 
     def test_a_zone_of_the_wrong_type_is_rejected_not_crashed_on(self):
         for zone in (["x"], {"a": 1}, 4):
             with self.subTest(zone=zone):
-                response = self.post({**valid_answers(), "zone": zone, "target_subsidies": "Yes", "subsidies": ["A"]})
+                response = self.post({**valid_answers(), "zone": zone})
                 self.assertEqual(response.status_code, 422)
                 self.assertIn("zone", self.error_fields(response))
 
@@ -195,23 +225,14 @@ class ApiTests(TestCase):
                 else:
                     self.assertIn("postal_code", self.error_fields(response))
 
-    def test_other_text_is_stored_without_control_or_invisible_characters(self):
-        from .formspec import validate
-        answers = {**valid_answers(), "wall_materials": ["Other"]}
-        clean, errors = validate({**answers, "wall_materials_other": " Cob\x00 wall‮​\t" + "x" * 500})
-        self.assertEqual(errors, [])
-        stored = clean["wall_materials_other"]
-        self.assertTrue(stored.startswith("Cob wall"))
-        self.assertLessEqual(len(stored), 200)
-        self.assertFalse(any(ch in stored for ch in "\x00‮​\t"))
-        clean, _ = validate({**answers, "wall_materials_other": "\x00​"})
-        self.assertNotIn("wall_materials_other", clean)  # nothing visible left
-
     def test_hidden_answers_are_dropped_not_passed_on(self):
         from .formspec import validate
-        clean, errors = validate({**valid_answers(), "solar_existing": "No", "solar_capacity_kw": 5})
+        clean, errors = validate({**valid_answers(), "weights": {"nonsense": True}})
         self.assertEqual(errors, [])
-        self.assertNotIn("solar_capacity_kw", clean)
+        self.assertNotIn("weights", clean)
+        clean, errors = validate({**advanced_answers(), "priority": "not a real option"})
+        self.assertEqual(errors, [])
+        self.assertNotIn("priority", clean)
 
     def test_unknown_field_with_a_trailing_newline_is_not_echoed(self):
         response = self.post({**valid_answers(), "not_a_question\n": "x"})
@@ -222,100 +243,54 @@ class ApiTests(TestCase):
         response = self.client.post("/api/recommend", data={}, content_type="application/json")
         self.assertEqual(response.status_code, 422)
 
-    # ---- numbers and units ----
+    # ---- numbers ----
     def test_typed_numbers_must_be_in_range_and_numeric(self):
-        for bad in (-5, 99999999, "100", True):  # 0 is allowed: a bill can be nothing
-            with self.subTest(energy_bill_winter=bad):
-                response = self.post({**valid_answers(), "energy_bill_winter": bad})
+        for field_id, bad in (("budget", -5), ("budget", 99999999), ("budget", "100"), ("budget", True),
+                              ("floor_area", 29), ("floor_area", 1001), ("floor_area", "180")):
+            with self.subTest(field=field_id, value=bad):
+                response = self.post({**valid_answers(), field_id: bad})
                 self.assertEqual(response.status_code, 422)
-                self.assertIn("energy_bill_winter", self.error_fields(response))
+                self.assertIn(field_id, self.error_fields(response))
+
+    def test_a_budget_of_nothing_is_allowed(self):
+        self.assertEqual(self.post({**valid_answers(), "budget": 0}).status_code, 200)
+
+    def test_floor_area_may_have_decimals(self):
+        self.assertEqual(self.post({**valid_answers(), "floor_area": 180.5}).status_code, 200)
 
     def test_whole_number_questions_reject_decimals(self):
         response = self.post({**valid_answers(), "year_built": 1985.5})
         self.assertIn("year_built", self.error_fields(response))
 
-    def test_imperial_values_are_converted_before_the_range_check(self):
-        # the sample temperature (10) is a metric value, so give a normal one in °F
-        base = {**valid_answers(), "preferred_units": IMPERIAL, "indoor_temperature": 70}
-        self.assertEqual(self.post(base).status_code, 200)
-        # 70 is a normal room temperature in °F but far too hot in °C
-        metric = {**valid_answers(), "preferred_units": METRIC, "indoor_temperature": 70}
-        self.assertEqual(self.post(metric).status_code, 422)
-
-    def test_thickness_is_millimetres_or_inches_by_the_chosen_units(self):
-        from .formspec import validate
-        imperial = {**valid_answers(), "preferred_units": IMPERIAL, "indoor_temperature": 70}  # a normal 70 °F
-        clean, errors = validate({**imperial, "wall_thickness": 8})
-        self.assertEqual(errors, [])
-        self.assertEqual(clean["wall_thickness"], 203.2)  # stored in mm
-        self.assertIn("wall_thickness", self.error_fields(self.post({**imperial, "wall_thickness": 0.5})))  # 12.7 mm: too thin
-        self.assertIn("roof_thickness", self.error_fields(self.post({**imperial, "roof_thickness": 70})))   # 1778 mm: too thick
-        metric = {**valid_answers(), "preferred_units": METRIC, "indoor_temperature": 20}
-        self.assertEqual(self.post({**metric, "wall_thickness": 8}).status_code, 422)  # 8 mm: too thin
-        self.assertEqual(self.post({**metric, "wall_thickness": 200}).status_code, 200)
-
-    # ---- questions answered from a dropdown that stand for a number ----
-    def test_floor_area_storeys_and_occupants_are_dropdowns(self):
-        by_id = {f["id"]: f for f in FIELDS}
-        for question in ("floor_area", "storeys", "storeys_above_ground", "occupants"):
-            self.assertEqual(by_id[question]["type"], "select", question)
-
-    def test_only_listed_options_are_accepted_for_them(self):
-        for question, bad in (("floor_area", "120"), ("floor_area", 120), ("storeys", 2), ("storeys", "11"),
-                              ("storeys", "1.5"), ("occupants", "9"), ("occupants", 3)):
-            with self.subTest(question=question, value=bad):
-                response = self.post({**valid_answers(), question: bad})
+    # ---- weights (advanced preferences) ----
+    def test_weights_need_every_criterion_as_a_whole_number_from_0_to_100(self):
+        bad_weights = [
+            {k: v for k, v in DEFAULT_WEIGHTS.items() if k != "payback"},  # one missing
+            {**DEFAULT_WEIGHTS, "extra": 5},
+            {**DEFAULT_WEIGHTS, "payback": 101},
+            {**DEFAULT_WEIGHTS, "payback": -1},
+            {**DEFAULT_WEIGHTS, "payback": 10.5},
+            {**DEFAULT_WEIGHTS, "payback": 10.0},
+            {**DEFAULT_WEIGHTS, "payback": "10"},
+            {**DEFAULT_WEIGHTS, "payback": True},
+            {**DEFAULT_WEIGHTS, "payback": None},
+            [10, 20],
+            "weights",
+        ]
+        for weights in bad_weights:
+            with self.subTest(weights=str(weights)[:60]):
+                response = self.post({**advanced_answers(), "weights": weights})
                 self.assertEqual(response.status_code, 422)
-                self.assertIn(question, self.error_fields(response))
+                self.assertIn("weights", self.error_fields(response))
 
-    def test_a_chosen_option_becomes_the_number_the_rest_of_the_app_uses(self):
-        from .formspec import FLOOR_AREA_OPTIONS, validate
-        clean, errors = validate({**valid_answers(), "floor_area": FLOOR_AREA_OPTIONS[2], "storeys": "3",
-                                  "storeys_above_ground": "2", "occupants": "3 or above"})
-        self.assertEqual(errors, [])
-        self.assertEqual(clean["floor_area"], 125)  # the "100–150 m²" band is stood for by 125 m²
-        self.assertEqual((clean["storeys"], clean["storeys_above_ground"], clean["occupants"]), (3, 2, 3))
+    def test_weights_at_their_limits(self):
+        self.assertEqual(self.post(advanced_answers(**{c: 100 for c in DEFAULT_WEIGHTS})).status_code, 200)
+        self.assertEqual(self.post(advanced_answers(**{**{c: 0 for c in DEFAULT_WEIGHTS}, "payback": 1})).status_code, 200)
 
-    def test_floor_area_options_are_shown_in_the_units_the_user_chose(self):
-        spec = self.client.get("/api/form-spec").json()
-        area = next(f for section in spec["sections"] for f in section["fields"] if f["id"] == "floor_area")
-        imperial = area["labels_by_unit"][IMPERIAL]
-        self.assertEqual(len(imperial), len(area["options"]))
-        self.assertTrue(all("ft²" in label for label in imperial))
-        self.assertTrue(all("m²" in label for label in area["options"]))
-        self.assertEqual(sorted(area["numeric"]), sorted(area["options"]))
-
-    def test_rules_that_link_two_questions_point_at_real_numeric_questions(self):
-        spec = self.client.get("/api/form-spec").json()
-        by_id = {f["id"]: f for section in spec["sections"] for f in section["fields"]}
-        linked = [f for f in by_id.values() if "not_more_than" in f]
-        self.assertTrue(linked)
-        for field in linked:
-            other = by_id[field["not_more_than"]["field"]]
-            for question in (field, other):
-                numeric = question["type"] in ("number", "currency") or (question["type"] == "select" and "numeric" in question)
-                self.assertTrue(numeric, question["id"])
-            self.assertTrue(field["not_more_than"]["message"])
-
-    def test_storeys_above_ground_cannot_exceed_total_storeys(self):
-        response = self.post({**valid_answers(), "storeys": "2", "storeys_above_ground": "3"})
-        self.assertIn("storeys_above_ground", self.error_fields(response))
-        self.assertIn("cannot be more than", response.json()["errors"][0]["message"])
-        self.assertEqual(self.post({**valid_answers(), "storeys": "3", "storeys_above_ground": "3"}).status_code, 200)
-
-    def test_every_building_element_can_be_chosen_for_a_renovation(self):
-        from .formspec import RENOVATION_ELEMENTS
-        self.assertEqual(RENOVATION_ELEMENTS, ["Walls", "Roof", "HVAC system", "Windows", "Doors"])
-        for element in RENOVATION_ELEMENTS:
-            with self.subTest(element=element):
-                records = [{"type": element, "year": 2015}]
-                self.assertEqual(self.post({**valid_answers(), "renovation_history": records}).status_code, 200)
-
-    def test_wall_materials_can_be_unknown(self):
-        spec = self.client.get("/api/form-spec").json()
-        walls = next(f for section in spec["sections"] for f in section["fields"] if f["id"] == "wall_materials")
-        self.assertIn("Unknown", walls["options"])
-        self.assertEqual(self.post({**valid_answers(), "wall_materials": ["Unknown"]}).status_code, 200)
+    def test_all_weights_at_zero_is_refused(self):
+        response = self.post(advanced_answers(**{c: 0 for c in DEFAULT_WEIGHTS}))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("above 0", response.json()["errors"][0]["message"])
 
     # ---- year built ----
     def test_the_generation_is_worked_out_from_the_year_that_was_typed(self):
@@ -338,11 +313,11 @@ class ApiTests(TestCase):
                 self.assertEqual(response.status_code, 422)
                 self.assertIn("year_built", self.error_fields(response))
 
-    def test_the_old_generation_dropdown_is_no_longer_a_question(self):
+    def test_the_generation_is_not_a_question(self):
         response = self.post({**valid_answers(), "year_of_construction": "Pre 1941"})
         self.assertIn("year_of_construction", self.error_fields(response))
 
-    # ---- postal code and province ----
+    # ---- postal code ----
     def test_valid_postal_codes_are_accepted_in_any_format(self):
         for good in ["N9A 1A1", "n9a1a1", " N9A  1A1 "]:
             with self.subTest(postal_code=good):
@@ -356,63 +331,6 @@ class ApiTests(TestCase):
                 response = self.post({**valid_answers(), "postal_code": bad})
                 self.assertEqual(response.status_code, 422)
                 self.assertIn("postal_code", self.error_fields(response))
-
-    # ---- questions that appear only after another answer ----
-    def test_hidden_questions_are_ignored(self):
-        answers = {**valid_answers(), "solar_existing": "No", "solar_capacity_kw": -50}
-        self.assertEqual(self.post(answers).status_code, 200)
-
-    def test_visible_conditional_questions_are_checked(self):
-        answers = {**valid_answers(), "solar_existing": "Yes", "solar_capacity_kw": -50}
-        response = self.post(answers)
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("solar_capacity_kw", self.error_fields(response))
-
-    # ---- renovation records ----
-    def test_renovation_records_are_checked(self):
-        year = next(f for f in FIELDS if f["id"] == "renovation_history")["year_range"][1]
-        good = [{"type": "Roof", "year": 2015}, {"type": "Windows", "year": year}]
-        self.assertEqual(self.post({**valid_answers(), "renovation_history": good}).status_code, 200)
-        for bad in (
-            [{"type": "", "year": 2015}],
-            [{"type": "New roof", "year": 2015}],   
-            [{"type": "Chimney", "year": 2015}],
-            [{"type": "Roof", "year": 1850}],
-            [{"type": "Roof", "year": year + 5}],
-            [{"type": "Roof"}],
-            [{"type": "Roof", "year": 2015, "extra": 1}],
-            [{"type": "Roof", "year": 2015}] * 21,
-        ):
-            with self.subTest(records=str(bad)[:40]):
-                response = self.post({**valid_answers(), "renovation_history": bad})
-                self.assertEqual(response.status_code, 422)
-                self.assertIn("renovation_history", self.error_fields(response))
-
-    # ---- government incentives ----
-    def test_incentives_are_filtered_by_zone(self):
-        from unittest.mock import patch
-        from . import incentives
-
-        sample = [
-            {"id": "a", "name": "A", "zones": "all"},
-            {"id": "b", "name": "B", "zones": ["zone4"]},
-        ]
-        with patch.object(incentives, "INCENTIVES", sample):
-            self.assertEqual([p["id"] for p in incentives.incentives_for("zone4")], ["a", "b"])
-            self.assertEqual([p["id"] for p in incentives.incentives_for("zone8")], ["a"])
-            self.assertEqual([p["id"] for p in incentives.incentives_for(None)], ["a"])
-
-    def test_incentives_endpoint_answers_for_a_zone(self):
-        response = self.client.get("/api/incentives", {"zone": ZONE_OPTIONS[0]})
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("programs", response.json())
-        self.assertEqual(self.client.get("/api/incentives", {"zone": "Zone 99"}).json(), {"programs": []})
-
-    def test_a_program_that_does_not_exist_is_rejected(self):
-        answers = {**valid_answers(), "target_subsidies": "Yes", "subsidies": ["Some program that does not exist"]}
-        self.assertEqual(self.post(answers).status_code, 422)
-        answers["subsidies"] = []
-        self.assertEqual(self.post(answers).status_code, 200)
 
     # ---- request hardening ----
     def test_recommend_requires_json_content_type(self):
@@ -527,8 +445,6 @@ class ApiTests(TestCase):
                 continue
             step = 1 if field.get("integer") else 0.01
             base = valid_answers()
-            if field.get("show_if"):
-                base[field["show_if"]["field"]] = field["show_if"]["equals"]
             for value in (field.get("min"), field.get("max")):
                 if value is None:
                     continue
@@ -541,50 +457,13 @@ class ApiTests(TestCase):
                 with self.subTest(field=field["id"], value=value):
                     self.assertIn(field["id"], self.error_fields(self.post({**base, field["id"]: value})))
 
-    def test_imperial_values_that_convert_exactly_onto_a_limit(self):
-        imperial = {**valid_answers(), "preferred_units": IMPERIAL, "indoor_temperature": 70}
-        for question, value, ok in (
-            ("indoor_temperature", 50, True),      # exactly 10 °C, the minimum
-            ("indoor_temperature", 86, True),      # exactly 30 °C, the maximum
-            ("indoor_temperature", 49.9, False),
-            ("indoor_temperature", 86.1, False),
-            ("wall_thickness", 20 / 25.4, True),   # exactly 20 mm
-            ("wall_thickness", 0.7874, False),     # 19.99996 mm: rounding down by the user goes under
-        ):
-            with self.subTest(question=question, value=value):
-                response = self.post({**imperial, question: value})
-                if ok:
-                    self.assertEqual(response.status_code, 200)
-                else:
-                    self.assertIn(question, self.error_fields(response))
-
     def test_every_listed_option_is_accepted(self):
-        # unit-dependent numbers are left out so switching units cannot put them out of range
-        base = {k: v for k, v in valid_answers().items()
-                if not FIELD_BY_ID[k].get("unit_kind")}
-        base["storeys"] = STOREY_OPTIONS[-1]  # so any "storeys above ground" fits under it
         for field in FIELDS:
-            if field["type"] not in ("select", "radio", "checklist", "multiselect"):
-                continue
-            if field["id"] == "zone":
+            if field["type"] != "select" or field["id"] in ("zone", "preference_mode"):
                 continue  # which zones fit depends on the postal code; see PostalCodeZoneTests
-            answers = [[o] for o in field["options"]] if field["type"] in ("checklist", "multiselect") \
-                else field["options"]
-            if field["type"] in ("checklist", "multiselect"):
-                answers.append(list(field["options"]))  # everything ticked at once
-            for answer in answers:
+            for answer in field["options"]:
                 with self.subTest(field=field["id"], answer=answer):
-                    self.assertEqual(self.post({**base, field["id"]: answer}).status_code, 200)
-
-    def test_renovation_records_at_their_limits(self):
-        field = FIELD_BY_ID["renovation_history"]
-        lo, hi = field["year_range"]
-        full = [{"type": "Roof", "year": lo}] * (field["max_records"] - 1) + [{"type": "Walls", "year": hi}]
-        self.assertEqual(self.post({**valid_answers(), "renovation_history": full}).status_code, 200)
-        for bad_year in (lo - 1, hi + 1):
-            with self.subTest(year=bad_year):
-                response = self.post({**valid_answers(), "renovation_history": [{"type": "Roof", "year": bad_year}]})
-                self.assertIn("renovation_history", self.error_fields(response))
+                    self.assertEqual(self.post({**valid_answers(), field["id"]: answer}).status_code, 200)
 
     # ---- how accepted answers are stored ----
     def test_whole_number_answers_are_stored_as_whole_numbers(self):
@@ -597,18 +476,6 @@ class ApiTests(TestCase):
                 self.assertEqual(errors, [])
                 self.assertIs(type(clean[field["id"]]), int)
 
-    def test_duplicate_ticks_are_stored_once(self):
-        from .formspec import validate
-        clean, errors = validate({**valid_answers(), "objectives": ["Reduce energy bills"] * 3})
-        self.assertEqual(errors, [])
-        self.assertEqual(clean["objectives"], ["Reduce energy bills"])
-
-    def test_other_text_is_dropped_when_other_is_not_ticked(self):
-        from .formspec import validate
-        clean, errors = validate({**valid_answers(), "wall_materials": ["Brick"], "wall_materials_other": "Cob"})
-        self.assertEqual(errors, [])
-        self.assertNotIn("wall_materials_other", clean)
-
     def test_zones_have_no_gaps_and_no_upper_limit_on_the_last(self):
         from .formspec import ZONES, zone_for_hdd
         for a, b in zip(ZONES, ZONES[1:]):
@@ -617,6 +484,7 @@ class ApiTests(TestCase):
         self.assertEqual(zone_for_hdd(2999.9)["id"], "zone4")
         self.assertEqual(zone_for_hdd(3000)["id"], "zone5")
         self.assertEqual(zone_for_hdd(9000)["id"], "zone8")
+
 
 
 # A postal code that starts with this letter, and a zone option, for each zone id.
@@ -690,7 +558,7 @@ class PostalCodeZoneTests(TestCase):
         answers = valid_answers()
         del answers["zone"]
         response = self.client.post("/api/recommend", data={"answers": answers}, content_type="application/json")
-        self.assertEqual(response.json()["errors"], [{"field": "zone", "message": "Climate Zone is required."}])
+        self.assertEqual(response.json()["errors"], [{"field": "zone", "message": "Climate zone is required."}])
 
     def test_the_form_spec_publishes_the_rule_for_the_page(self):
         spec = self.client.get("/api/form-spec").json()
@@ -862,7 +730,7 @@ class SettingsTests(SimpleTestCase):
 class EndpointMethodTests(TestCase):
     def test_only_the_expected_methods_are_allowed(self):
         for url, allowed in (("/api/recommend", "POST"), ("/api/health", "GET"),
-                             ("/api/form-spec", "GET"), ("/api/incentives", "GET")):
+                             ("/api/form-spec", "GET")):
             for method in ("get", "post", "put", "patch", "delete"):
                 if method.upper() == allowed:
                     continue
@@ -870,7 +738,7 @@ class EndpointMethodTests(TestCase):
                     self.assertEqual(getattr(self.client, method)(url).status_code, 405)
 
     def test_unknown_paths_and_the_admin_do_not_exist(self):
-        for url in ("/admin/", "/api/", "/api/recommend/", "/api/unknown"):
+        for url in ("/admin/", "/api/", "/api/recommend/", "/api/unknown", "/api/incentives"):
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 404)
 
@@ -889,7 +757,7 @@ class EndpointMethodTests(TestCase):
 
     def test_a_host_that_is_not_allowed_is_refused(self):
         # GET /api/health is the one exception, for load balancer checks (config/health.py).
-        for method, url in (("get", "/api/form-spec"), ("get", "/api/incentives"),
+        for method, url in (("get", "/api/form-spec"),
                             ("post", "/api/recommend"), ("post", "/api/health")):
             with self.subTest(method=method, url=url):
                 self.assertEqual(getattr(self.client, method)(url, HTTP_HOST="evil.example").status_code, 400)
@@ -901,9 +769,9 @@ class EndpointMethodTests(TestCase):
 
     def test_negative_zero_is_stored_as_plain_zero(self):
         from .formspec import validate
-        clean, errors = validate({**valid_answers(), "energy_bill_winter": -0.0})
+        clean, errors = validate({**valid_answers(), "budget": -0.0})
         self.assertEqual(errors, [])
-        self.assertEqual(str(clean["energy_bill_winter"]), "0.0")
+        self.assertEqual(str(clean["budget"]), "0.0")
 
 
 @override_settings(RATELIMIT_ENABLE=False)
@@ -937,21 +805,11 @@ class WholeNumberTests(TestCase):
                     self.assertEqual(response.status_code, 422)
                     self.assertIn(field["id"], self.fields_in_error(response))
 
-    def test_renovation_years_reject_floats(self):
-        for year in (2015.0, 2015.5, 1e3, 2e3):
-            with self.subTest(year=year):
-                response = self.post_json(renovation_history=[{"type": "Roof", "year": year}])
-                self.assertEqual(response.status_code, 422)
-                self.assertIn("renovation_history", self.fields_in_error(response))
-
     def test_integers_are_still_accepted_and_kept_as_integers(self):
         from .formspec import validate
-        clean, errors = validate({**valid_answers(), "year_built": 1985, "exterior_doors": 3,
-                                  "renovation_history": [{"type": "Roof", "year": 2015}]})
+        clean, errors = validate({**valid_answers(), "year_built": 1985})
         self.assertEqual(errors, [])
         self.assertIs(type(clean["year_built"]), int)
-        self.assertIs(type(clean["exterior_doors"]), int)
-        self.assertIs(type(clean["renovation_history"][0]["year"]), int)
 
 
 @override_settings(RATELIMIT_ENABLE=False)
@@ -964,40 +822,18 @@ class CrossCheckTests(TestCase):
     def errors(self, response):
         return response.json().get("errors", [])
 
-    def test_a_renovation_cannot_be_older_than_the_building(self):
-        response = self.post(year_built=2000, renovation_history=[{"type": "Roof", "year": 2010},
-                                                                   {"type": "Walls", "year": 1999}])
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(self.errors(response),
-                         [{"field": "renovation_history", "message": "Renovation 2 is dated before the building was built (2000)."}])
+    def test_range_errors_name_the_limits(self):
+        self.assertIn("(30 to 1000)", self.errors(self.post(floor_area=10))[0]["message"])
+        self.assertIn("(0 to 10000000)", self.errors(self.post(budget=-1))[0]["message"])
 
-    def test_a_renovation_in_the_year_it_was_built_is_fine(self):
-        self.assertEqual(self.post(year_built=2000, renovation_history=[{"type": "Roof", "year": 2000}]).status_code, 200)
-
-    def test_rejected_renovations_are_not_passed_on(self):
+    def test_a_climate_zone_answer_is_also_stored_as_its_id(self):
         from .formspec import validate
-        clean, errors = validate({**valid_answers(), "year_built": 2000,
-                                  "renovation_history": [{"type": "Roof", "year": 1990}]})
-        self.assertTrue(errors)
-        self.assertNotIn("renovation_history", clean)
+        clean, errors = validate(valid_answers())
+        self.assertEqual(errors, [])
+        self.assertEqual(clean["zone_id"], "zone5")
 
-    def test_range_errors_are_written_in_the_units_the_user_chose(self):
-        imperial = {**valid_answers(), "preferred_units": IMPERIAL, "indoor_temperature": 70}
-        message = self.errors(self.post(**{**imperial, "indoor_temperature": 100}))[0]["message"]
-        self.assertIn("(50 to 86 °F)", message)
-        message = self.errors(self.post(**{**imperial, "wall_thickness": 0.1}))[0]["message"]
-        self.assertIn("(0.79 to 59.06 in)", message)
-        metric = {**valid_answers(), "preferred_units": METRIC, "indoor_temperature": 20}
-        self.assertIn("(10 to 30 °C)", self.errors(self.post(**{**metric, "indoor_temperature": 40}))[0]["message"])
-        self.assertIn("(0 to 20000)", self.errors(self.post(**{**metric, "energy_bill_winter": -1}))[0]["message"])
-
-    def test_other_text_that_is_not_text_is_reported(self):
-        for bad in (["Cob"], 5, {"a": 1}, True):
-            with self.subTest(other=bad):
-                response = self.post(wall_materials=["Other"], wall_materials_other=bad)
-                self.assertEqual(response.status_code, 422)
-                self.assertEqual([e["field"] for e in self.errors(response)], ["wall_materials_other"])
-        self.assertEqual(self.post(wall_materials=["Other"], wall_materials_other=None).status_code, 200)
+    def test_a_climate_zone_id_cannot_be_sent_directly(self):
+        self.assertIn("zone_id", [e["field"] for e in self.errors(self.post(zone_id="zone5"))])
 
 
 class CurrentYearTests(SimpleTestCase):
@@ -1016,8 +852,7 @@ class CurrentYearTests(SimpleTestCase):
         this_year = date.today().year
         try:
             with mock.patch.object(formspec, "date", NextYear):
-                answers = {**valid_answers(), "year_built": this_year + 1,
-                           "renovation_history": [{"type": "Roof", "year": this_year + 1}]}
+                answers = {**valid_answers(), "year_built": this_year + 1}
                 clean, errors = formspec.validate(answers)
                 self.assertEqual(errors, [])
                 spec = formspec.public_spec()

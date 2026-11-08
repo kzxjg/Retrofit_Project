@@ -121,4 +121,4 @@ class RealPostgresTests(TestCase):
             response = self.client.post("/api/recommend", data={"answers": valid_answers()},
                                         content_type="application/json")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("package", response.json())
+        self.assertIn("packages", response.json())

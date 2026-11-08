@@ -1,63 +1,45 @@
 from dataclasses import dataclass
 
+from .formspec import NOT_SURE
 
-#FAKE WEIGHTS NEED THE REAL ONES FROM THE DATA AND THEN REDO THIS ENTIRE SECTION
+# Which representative modelled house (archetype) a home is compared with. Only the questions the
+# form asks are used: building form and construction period.
+# PLACEHOLDER WEIGHTS AND ARCHETYPES: replace with the real archetype library and its weights.
 WEIGHTS = {
-    "house_type": 5,
+    "building_form": 5,
     "year_of_construction": 4,
-    "primary_heating": 3,
-    "heating_fuel": 3,
-    "cooling_system": 2,
-    "window_type": 2,
-    "insulation_type": 2,
-    "wall_construction": 1,
-    "basement_type": 1,
 }
 
 ARCHETYPES = [
     {
-        "id": "detached_pre1941_gas",
-        "idf_file": "idf/detached_pre1941_gas.idf",
-        "profile": {
-            "house_type": "Detached house", "year_of_construction": "Pre 1941",
-            "primary_heating": "Gas furnace", "heating_fuel": "Natural gas",
-            "cooling_system": "Central air conditioner", "window_type": "Single glazing",
-            "insulation_type": "Unknown", "wall_construction": "Masonry",
-            "basement_type": "Full basement",
-        },
+        "id": "detached_pre1941",
+        "idf_file": "idf/detached_pre1941.idf",
+        "profile": {"building_form": "Detached house", "year_of_construction": "Pre 1941"},
     },
     {
-        "id": "detached_gen1_gas",
-        "idf_file": "idf/detached_gen1_gas.idf",
-        "profile": {
-            "house_type": "Detached house", "year_of_construction": "Generation 1 (1941 - 1996)",
-            "primary_heating": "Gas furnace", "heating_fuel": "Natural gas",
-            "cooling_system": "Central air conditioner", "window_type": "Double glazing",
-            "insulation_type": "Fibreglass", "wall_construction": "Wood frame",
-            "basement_type": "Full basement",
-        },
+        "id": "detached_gen1",
+        "idf_file": "idf/detached_gen1.idf",
+        "profile": {"building_form": "Detached house", "year_of_construction": "Generation 1 (1941 - 1996)"},
     },
     {
-        "id": "detached_gen3_heatpump",
-        "idf_file": "idf/detached_gen3_heatpump.idf",
-        "profile": {
-            "house_type": "Detached house", "year_of_construction": "Generation 3 (2011 - 2016)",
-            "primary_heating": "Heat pump", "heating_fuel": "Electricity",
-            "cooling_system": "Heat pump", "window_type": "Double glazing",
-            "insulation_type": "Fibreglass", "wall_construction": "Wood frame",
-            "basement_type": "Full basement",
-        },
+        "id": "detached_gen3",
+        "idf_file": "idf/detached_gen3.idf",
+        "profile": {"building_form": "Detached house", "year_of_construction": "Generation 3 (2011 - 2016)"},
     },
     {
-        "id": "townhouse_gen2_gas",
-        "idf_file": "idf/townhouse_gen2_gas.idf",
-        "profile": {
-            "house_type": "Row house or townhouse", "year_of_construction": "Generation 2 (1997 - 2010)",
-            "primary_heating": "Gas furnace", "heating_fuel": "Natural gas",
-            "cooling_system": "Central air conditioner", "window_type": "Double glazing",
-            "insulation_type": "Fibreglass", "wall_construction": "Wood frame",
-            "basement_type": "Slab-on-grade",
-        },
+        "id": "semi_detached_gen1",
+        "idf_file": "idf/semi_detached_gen1.idf",
+        "profile": {"building_form": "Semi-detached house", "year_of_construction": "Generation 1 (1941 - 1996)"},
+    },
+    {
+        "id": "townhouse_gen2",
+        "idf_file": "idf/townhouse_gen2.idf",
+        "profile": {"building_form": "Townhouse", "year_of_construction": "Generation 2 (1997 - 2010)"},
+    },
+    {
+        "id": "lowrise_apartment_gen2",
+        "idf_file": "idf/lowrise_apartment_gen2.idf",
+        "profile": {"building_form": "Low-rise apartment", "year_of_construction": "Generation 2 (1997 - 2010)"},
     },
 ]
 
@@ -66,8 +48,9 @@ ARCHETYPES = [
 class BaselineMatch:
     archetype_id: str
     idf_file: str
-    confidence: float  
-    mismatched: list  
+    profile: dict
+    confidence: float  # share of the weighted questions that matched (unanswered count half)
+    mismatched: list
 
 
 def match_baseline(answers):
@@ -79,8 +62,8 @@ def match_baseline(answers):
             given = answers.get(field)
             if given == archetype["profile"][field]:
                 score += weight
-            elif given in (None, "Unknown"):
-                score += weight / 2  
+            elif given in (None, NOT_SURE):
+                score += weight / 2
             else:
                 mismatched.append(field)
         if best is None or score > best[0]:
@@ -89,6 +72,7 @@ def match_baseline(answers):
     return BaselineMatch(
         archetype_id=archetype["id"],
         idf_file=archetype["idf_file"],
+        profile=archetype["profile"],
         confidence=round(score / total, 2),
         mismatched=mismatched,
     )

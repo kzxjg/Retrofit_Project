@@ -4,8 +4,8 @@
     python tools/spec_contract.py check < in.json   # in.json: a list of answer objects
 
 `check` runs each answer object through the real POST /api/recommend validation and
-prints, for each, {"errors": [...], "package": "..." or null}. Used by
-frontend/src/contract.test.ts. Run from the Retrofit folder.
+prints, for each, {"errors": [...], "report": {...} or null}. Used by
+frontend/src/contract.test.tsx. Run from the Retrofit folder.
 """
 
 import json
@@ -21,12 +21,12 @@ import django  # noqa: E402
 django.setup()
 
 from recommendations.formspec import public_spec, validate  # noqa: E402
-from recommendations.logic import recommend_package  # noqa: E402
+from recommendations.logic import build_report  # noqa: E402
 
 
 def check(answers):
     clean, errors = validate(answers)
-    return {"errors": errors, "package": None if errors else recommend_package(clean)}
+    return {"errors": errors, "report": None if errors else build_report(clean)}
 
 
 def main():
