@@ -20,6 +20,7 @@ from recommendations.tests import PRODUCTION_DB, STRONG_KEY, valid_answers
 
 ROOT = Path(settings.BASE_DIR)
 SITE = "retrofit.example.com"
+ORIGIN_SECRET = "test-origin-verify-secret-0123456789"
 PRODUCTION = {
     **PRODUCTION_DB,
     "DJANGO_SECRET_KEY": STRONG_KEY,
@@ -27,6 +28,10 @@ PRODUCTION = {
     "DJANGO_CSRF_TRUSTED_ORIGINS": f"https://{SITE}",
     "DJANGO_TRUST_PROXY_HEADERS": "1",
     "DJANGO_TRUSTED_PROXY_COUNT": "1",
+    # A shared cache is mandatory in production. Port 1 refuses connections
+    # immediately, which exercises the local fallback without a long timeout.
+    "DJANGO_REDIS_URL": "rediss://127.0.0.1:1/0",
+    "DJANGO_ORIGIN_VERIFY_SECRET": ORIGIN_SECRET,
 }
 
 # Runs in the fresh interpreter. Sends each request in REQUESTS, prints one JSON
@@ -44,7 +49,8 @@ REQUEST_SCRIPT = textwrap.dedent("""
     results = []
     for req in json.loads(sys.argv[1]):
         client = Client(raise_request_exception=False, enforce_csrf_checks=True)
-        headers = {"HTTP_HOST": req["host"]}
+        headers = {"HTTP_HOST": req["host"],
+                   "HTTP_X_ORIGIN_VERIFY": os.environ["DJANGO_ORIGIN_VERIFY_SECRET"]}
         if req.get("https"):
             headers["HTTP_X_FORWARDED_PROTO"] = "https"
         headers.update(req.get("headers", {}))
@@ -231,19 +237,42 @@ class CacheSettingsTests(SimpleTestCase):
     def test_local_work_may_use_plain_redis_or_none(self):
         result = self.cache_backend(DJANGO_DEBUG="1", DJANGO_REDIS_URL="redis://127.0.0.1:6379/0")
         self.assertEqual(json.loads(result.stdout)["BACKEND"], "django.core.cache.backends.redis.RedisCache")
-        result = self.cache_backend(DJANGO_DEBUG="1")
+        result = self.cache_backend(DJANGO_DEBUG="1", DJANGO_REDIS_URL="")
         self.assertEqual(json.loads(result.stdout)["BACKEND"], "django.core.cache.backends.locmem.LocMemCache")
+
+    def test_production_refuses_to_start_without_a_shared_cache(self):
+        result = self.cache_backend(DJANGO_REDIS_URL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DJANGO_REDIS_URL", result.stderr)
 
     def deploy_check(self, **env):
         clean = {k: v for k, v in os.environ.items() if not k.startswith("DJANGO_")}
         return subprocess.run([sys.executable, "manage.py", "check", "--deploy"], cwd=ROOT,
                               capture_output=True, text=True, env={**clean, **PRODUCTION, **env})
 
-    def test_deploy_check_warns_when_rate_limits_are_not_shared(self):
+    def test_deploy_check_passes_with_a_shared_cache_and_origin_secret(self):
         result = self.deploy_check()
-        self.assertIn("recommendations.W001", result.stdout + result.stderr)
-        result = self.deploy_check(DJANGO_REDIS_URL="rediss://cache.example.internal:6379/0")
+        self.assertEqual(result.returncode, 0, result.stdout[-800:] + result.stderr[-800:])
         self.assertNotIn("recommendations.W001", result.stdout + result.stderr)
+        self.assertNotIn("recommendations.W003", result.stdout + result.stderr)
+
+    def test_deploy_check_warns_about_local_counts_in_development(self):
+        result = self.deploy_check(DJANGO_DEBUG="1", DJANGO_REDIS_URL="")
+        self.assertIn("recommendations.W001", result.stdout + result.stderr)
+
+    def test_deploy_check_warns_about_too_few_hops_for_cloudfronts_header(self):
+        result = self.deploy_check(
+            DJANGO_TRUSTED_PROXY_COUNT="1", DJANGO_PROXY_SSL_HEADER="CloudFront-Forwarded-Proto"
+        )
+        self.assertIn("recommendations.W002", result.stdout + result.stderr)
+        result = self.deploy_check(
+            DJANGO_TRUSTED_PROXY_COUNT="2", DJANGO_PROXY_SSL_HEADER="CloudFront-Forwarded-Proto"
+        )
+        self.assertNotIn("recommendations.W002", result.stdout + result.stderr)
+
+    def test_deploy_check_warns_when_proxy_headers_have_no_origin_secret(self):
+        result = self.deploy_check(DJANGO_ORIGIN_VERIFY_SECRET="")
+        self.assertIn("recommendations.W003", result.stdout + result.stderr)
 
 
 UNREACHABLE_REDIS = {
@@ -255,29 +284,39 @@ UNREACHABLE_REDIS = {
 }
 
 
-@override_settings(CACHES=UNREACHABLE_REDIS, RATELIMIT_ENABLE=True)
+@override_settings(CACHES=UNREACHABLE_REDIS, RATELIMIT_ENABLE=True, RECOMMEND_RATE_LIMIT="2/m")
 class CacheOutageTests(TestCase):
+    def setUp(self):
+        from recommendations.views import _fallback_cache, _reset_circuit_breaker
+        _reset_circuit_breaker()
+        _fallback_cache.clear()
+
     def tearDown(self):
         caches["default"].close()
 
-    def test_a_cache_outage_lets_requests_through_and_logs_an_error(self):
+    def post(self, answers=None):
+        return self.client.post(
+            "/api/recommend", data={"answers": valid_answers() if answers is None else answers},
+            content_type="application/json",
+        )
+
+    def test_a_cache_outage_uses_a_local_limit_instead_of_unlimited_passes(self):
         with self.assertLogs("recommendations.views", level="ERROR") as logs:
-            response = self.client.post("/api/recommend", data={"answers": valid_answers()},
-                                        content_type="application/json")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("packages", response.json())
+            self.assertEqual(self.post().status_code, 200)
+            self.assertEqual(self.post().status_code, 200)
+            self.assertEqual(self.post().status_code, 429)
         self.assertIn("Rate-limit cache unavailable", logs.output[0])
+        self.assertIn("local fallback", logs.output[0])
 
     def test_bad_answers_are_still_refused_during_an_outage(self):
         with self.assertLogs("recommendations.views", level="ERROR"):
-            response = self.client.post("/api/recommend", data={"answers": {}},
-                                        content_type="application/json")
+            response = self.post({})
         self.assertEqual(response.status_code, 422)
 
 
 class GunicornConfigTests(SimpleTestCase):
     def load(self, **env):
-        names = ("PORT", "GUNICORN_WORKERS", "GUNICORN_TIMEOUT")
+        names = ("PORT", "GUNICORN_WORKERS", "GUNICORN_THREADS", "GUNICORN_TIMEOUT")
         saved = {name: os.environ.pop(name, None) for name in names}
         os.environ.update(env)
         try:
@@ -292,6 +331,8 @@ class GunicornConfigTests(SimpleTestCase):
         conf = self.load()
         self.assertEqual(conf["bind"], "0.0.0.0:8000")
         self.assertEqual((conf["workers"], conf["timeout"]), (3, 30))
+        # Threaded, so one stalled connection cannot hold a whole worker.
+        self.assertEqual((conf["worker_class"], conf["threads"]), ("gthread", 8))
         self.assertEqual((conf["accesslog"], conf["errorlog"]), ("-", "-"))
 
     def test_port_and_workers_can_be_set(self):
@@ -333,8 +374,20 @@ class ContainerImageTests(SimpleTestCase):
         self.assertIn("DJANGO_DEBUG=0", self.dockerfile)
         self.assertIn("DJANGO_DB_SSLMODE=verify-full", self.dockerfile)
 
-    def test_runtime_packages_are_pinned(self):
-        lines = (ROOT / "requirements.txt").read_text().splitlines()
-        for package in ("gunicorn", "redis", "psycopg[binary]", "Django", "django-ratelimit"):
+    def test_runtime_packages_are_pinned_and_hash_locked(self):
+        text = (ROOT / "requirements.txt").read_text()
+        lines = text.splitlines()
+        for package in ("gunicorn", "redis", "psycopg[binary]", "psycopg-binary", "Django", "django-ratelimit"):
             with self.subTest(package=package):
                 self.assertTrue(any(line.startswith(f"{package}==") for line in lines))
+        self.assertIn("--hash=sha256:", text)
+        self.assertIn("--require-hashes", self.dockerfile)
+
+    def test_the_container_image_and_rds_bundle_are_pinned(self):
+        self.assertRegex(self.dockerfile, r"FROM python:[^\s]+@sha256:[0-9a-f]{64}")
+        self.assertRegex(self.dockerfile, r"ADD --chmod=644 --checksum=sha256:[0-9a-f]{64}")
+
+    def test_the_image_trusts_no_proxy_and_the_template_sets_the_cloudfront_topology(self):
+        self.assertIn("DJANGO_TRUSTED_PROXY_COUNT=0", self.dockerfile)
+        self.assertIn("DJANGO_TRUST_PROXY_HEADERS=0", self.dockerfile)
+        self.assertIn("DJANGO_TRUSTED_PROXY_COUNT=2", (ROOT / ".env.example").read_text())

@@ -1,13 +1,9 @@
+import copy
 import math
 import re
 from datetime import date
 
-CURRENT_YEAR = date.today().year  # at import; _sync_current_year() keeps the limit up to date
-
-
-def _sync_current_year():
-    """Move the "this year" limit forward when the calendar does, without a server restart."""
-    FIELD_BY_ID["year_built"]["max"] = date.today().year
+CURRENT_YEAR = date.today().year  # the import-time default; validate()/public_spec() use today
 
 
 POSTAL_LETTERS = {
@@ -215,16 +211,26 @@ MAX_ERRORS = 20
 SAFE_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,49}")
 
 
+#returns the JSON so the frontend can build off it 
 def public_spec():
-    _sync_current_year()
-    return {"sections": SECTIONS}
+    """A per-request copy, so no caller can mutate the shared form definition.
+
+    The copy also carries the current calendar year without writing into
+    SECTIONS or FIELD_BY_ID.
+    """
+    sections = copy.deepcopy(SECTIONS)
+    for section in sections:
+        for field in section["fields"]:
+            if field["id"] == "year_built":
+                field["max"] = date.today().year
+    return {"sections": sections}
 
 
 # Far beyond any real answer. Python ints have no size limit, and one too big to
 # turn into a float would crash float() and math.isfinite().
 MAX_MAGNITUDE = 10**15
 
-
+#Checks that a value is a real finite number. Rejects booleans infinity and Nan values.
 def _is_number(value):
     if isinstance(value, bool):
         return False
@@ -239,7 +245,6 @@ def _visible(field, data):
 
 
 def validate(data):
-    _sync_current_year()
     errors = []
     clean = {}
 
@@ -291,6 +296,8 @@ def validate(data):
                 continue
             value = value + 0  # -0.0 becomes 0.0
             lo, hi = field.get("min"), field.get("max")
+            if fid == "year_built":
+                hi = date.today().year  # never mutate the shared spec for a calendar rollover
             if (lo is not None and value < lo) or (hi is not None and value > hi):
                 err(fid, f"{label} is outside the allowed range ({lo} to {hi}).")
                 continue

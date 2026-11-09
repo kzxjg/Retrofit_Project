@@ -1,0 +1,65 @@
+# Runs the tests on every push and pull request.
+#
+# Each step is a command. A command that exits with 0 passed; any other exit
+# code (the test runners use 1) fails the step, stops the job and marks the
+# commit with a red cross on GitHub. All steps exiting 0 gives a green tick.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run for the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Local settings: no secret key, database or Redis needed (see config/settings.py).
+      DJANGO_DEBUG: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install Python packages
+        run: |
+          pip install --require-hashes -r requirements.txt
+          # The test-only packages have no hashes, so they cannot share a pip
+          # command with the hashed file that requirements-dev.txt includes.
+          grep -v '^-r' requirements-dev.txt > "$RUNNER_TEMP/dev-only.txt"
+          pip install -r "$RUNNER_TEMP/dev-only.txt"
+
+      - name: Django tests
+        run: python manage.py test
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend packages
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend tests
+        working-directory: frontend
+        run: |
+          # contract.test.tsx checks the page against the real Django validation.
+          export RETROFIT_PYTHON="$(which python)"
+          npm test

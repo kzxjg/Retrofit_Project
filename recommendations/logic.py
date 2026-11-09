@@ -50,7 +50,7 @@ SECONDARY_CRITERION = dict(zip(SECONDARY_OPTIONS, [
 ]))
 SECONDARY_SHARE = 0.20
 
-
+#Priority sliders 6 weights that add up to 1
 def criterion_weights(answers):
     """The user's weights, normalised to add up to 1, keyed by criterion id."""
     if answers.get("preference_mode") == ADVANCED_MODE:
@@ -66,6 +66,7 @@ def criterion_weights(answers):
     return {c: w / total for c, w in zip(CRITERIA_IDS, raw)}
 
 
+#Rates package from 0 to 1 on each of the 6 criteria. 
 def criterion_values(package):
     """How well a package does on each criterion, from 0 (worst) to about 1 (best)."""
     return {
@@ -77,12 +78,13 @@ def criterion_values(package):
         "resilience": package["resilience"] / 100,
     }
 
-
+#Gets the overall score of the 6 weights
 def score(package, weights):
     values = criterion_values(package)
     return sum(values[c] * weights[c] for c in CRITERIA_IDS)
 
 
+#Estimates energy, heating, cooling and emissions as floor area x first rates
 def baseline_energy(area_m2):
     energy = round(area_m2 * ENERGY_KWH_PER_M2)
     return {

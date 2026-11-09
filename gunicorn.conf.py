@@ -22,6 +22,14 @@ bind = f"0.0.0.0:{_whole_number('PORT', 8000)}"
 # host's CPUs rather than the task's share, so set GUNICORN_WORKERS to about
 # 2 x vCPUs + 1 for the task size (3 suits a 1 vCPU ECS task).
 workers = _whole_number("GUNICORN_WORKERS", 3)
+
+# Threaded workers: with the default "sync" class a worker serves one connection
+# at a time, so a client that opens a connection and stops sending holds a whole
+# worker, and three such connections took the API (and its health check) down.
+# Here a stalled connection holds one thread. This raises the bar; it does not
+# remove it, so keep a proxy that buffers whole requests in front as well.
+worker_class = "gthread"
+threads = _whole_number("GUNICORN_THREADS", 8)
 timeout = _whole_number("GUNICORN_TIMEOUT", 30)
 graceful_timeout = 30
 
