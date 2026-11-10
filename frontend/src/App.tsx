@@ -154,6 +154,22 @@ export default function App() {
   const payloadKey = JSON.stringify(buildPayload(spec, answers))
   const stale = report !== null && reportFor !== payloadKey
 
+  // A step in the side panel opens only once every step before it is done: the priorities once the
+  // home profile is complete, the report steps once both are complete and a report has been made.
+  const homeDone = validate(spec, answers, sectionFields('home')).length === 0
+  const prioritiesDone = homeDone && validate(spec, answers, sectionFields('priorities')).length === 0
+  const homeLock = homeDone ? null : 'Complete your home profile first.'
+  const reportLock =
+    homeLock ?? (!prioritiesDone ? 'Set your budget and priorities first.' : !report ? 'Apply your preferences to create the report first.' : null)
+  const lockedBecause: Record<StepId, string | null> = {
+    home: null,
+    preferences: homeLock,
+    baseline: reportLock,
+    recommendations: reportLock,
+    results: reportLock,
+  }
+  const anyLocked = STEPS.some((s) => s.id !== step && lockedBecause[s.id])
+
   async function makeReport() {
     if (!spec) return
     setServerError(null)
@@ -381,18 +397,24 @@ export default function App() {
         </p>
         <div className="pg-layout">
           <nav className="pg-nav" aria-label="Main sections">
-            {STEPS.map((s, i) => (
-              <button
-                key={s.id}
-                type="button"
-                className={s.id === step ? 'pg-nav-btn pg-nav-btn--on' : 'pg-nav-btn'}
-                aria-current={s.id === step ? 'step' : undefined}
-                onClick={() => go(s.id)}
-              >
-                <span className="pg-step-num">{i + 1}</span>
-                {s.label}
-              </button>
-            ))}
+            {STEPS.map((s, i) => {
+              const lock = s.id === step ? null : lockedBecause[s.id]
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={s.id === step ? 'pg-nav-btn pg-nav-btn--on' : lock ? 'pg-nav-btn pg-nav-btn--locked' : 'pg-nav-btn'}
+                  aria-current={s.id === step ? 'step' : undefined}
+                  disabled={lock !== null}
+                  title={lock ?? undefined}
+                  onClick={() => go(s.id)}
+                >
+                  <span className="pg-step-num">{i + 1}</span>
+                  {s.label}
+                </button>
+              )
+            })}
+            {anyLocked && <p className="pg-nav-hint">Complete each step to unlock the next.</p>}
           </nav>
           <div className="pg-content">
             {serverError && (

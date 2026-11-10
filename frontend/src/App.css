@@ -58,6 +58,8 @@
 .pg-nav-btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
 .pg-step-num { display: inline-grid; place-items: center; flex: none; width: 1.7rem; height: 1.7rem; border-radius: 50%; background: var(--inner); margin-right: 0.6rem; font-size: 0.8rem; font-weight: 700; }
 .pg-nav-btn--on .pg-step-num { background: var(--accent); color: #fff; }
+.pg-nav-btn--locked, .pg-nav-btn--locked:hover { background: transparent; color: var(--muted); opacity: 0.5; cursor: not-allowed; }
+.pg-nav-hint { margin: 0.5rem 0.75rem 0.25rem; font-size: 0.8rem; color: var(--muted); grid-column: 1 / -1; }
 
 .pg-box { background: var(--box); border: 1px solid var(--edge); border-radius: 20px; padding: 1.5rem; }
 

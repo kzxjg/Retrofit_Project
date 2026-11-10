@@ -64,6 +64,8 @@ def required_ids(answers):
 class ApiTests(TestCase):
     def setUp(self):
         cache.clear()  # rate-limit counts live in the cache
+        from .views import _reset_circuit_breaker
+        _reset_circuit_breaker()
 
     def post(self, answers):
         return self.client.post(
@@ -582,10 +584,14 @@ class SettingsTests(SimpleTestCase):
         code = "import json, config.settings as s; print(json.dumps({k: getattr(s, k, None) for k in " \
                "['DEBUG','ALLOWED_HOSTS','SESSION_COOKIE_SECURE','CSRF_COOKIE_SECURE','SECURE_SSL_REDIRECT'," \
                "'SECURE_HSTS_SECONDS','SECURE_PROXY_SSL_HEADER','SECURE_HSTS_INCLUDE_SUBDOMAINS'," \
-               "'SECURE_HSTS_PRELOAD','CSRF_TRUSTED_ORIGINS','TRUSTED_PROXY_COUNT',]}))"
+               "'SECURE_HSTS_PRELOAD','CSRF_TRUSTED_ORIGINS','TRUSTED_PROXY_COUNT','RECOMMEND_RATE_LIMIT',]}))"
         result = subprocess.run(
             [sys.executable, "-c", code], cwd=Path(settings.BASE_DIR), capture_output=True, text=True,
-            env={**clean, "DJANGO_SETTINGS_MODULE": "config.settings", **PRODUCTION_DB, **env},
+            env={**clean, "DJANGO_SETTINGS_MODULE": "config.settings",
+                 # Production now requires a shared cache. Loading settings opens no
+                 # connection, so this URL need not point anywhere real.
+                 "DJANGO_REDIS_URL": "rediss://cache.example.internal:6379/0",
+                 **PRODUCTION_DB, **env},
         )
         return result
 
@@ -649,6 +655,26 @@ class SettingsTests(SimpleTestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("ImproperlyConfigured", result.stderr)
                     self.assertIn(name, result.stderr)
+
+    def test_the_rate_limit_can_be_set_and_defaults_to_30_a_minute(self):
+        self.assertEqual(self.loaded(DJANGO_SECRET_KEY=STRONG_KEY)["RECOMMEND_RATE_LIMIT"], "30/m")
+        self.assertEqual(
+            self.loaded(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_RECOMMEND_RATE_LIMIT="  ")["RECOMMEND_RATE_LIMIT"], "30/m"
+        )
+        for value in ("30/m", "1/s", "500/h", "10/5m", "1000/d", " 60/m "):
+            with self.subTest(value=value):
+                s = self.loaded(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_RECOMMEND_RATE_LIMIT=value)
+                self.assertEqual(s["RECOMMEND_RATE_LIMIT"], value.strip())
+
+    def test_a_rate_limit_with_a_typo_stops_startup_instead_of_turning_the_limit_off(self):
+        # django-ratelimit cannot read these, and the view would let every request through.
+        for value in ("30", "abc", "30/", "30/x", "/m", "0/m", "-1/m", "30 /m", "30/mins", "1.5/m", "３０/m",
+                      "30/0m", "30/00s", "30/0h", "30/0d"):
+            with self.subTest(value=value):
+                result = self.settings_for(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_RECOMMEND_RATE_LIMIT=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ImproperlyConfigured", result.stderr)
+                self.assertIn("DJANGO_RECOMMEND_RATE_LIMIT", result.stderr)
 
     def test_hsts_can_be_turned_off_and_then_sends_no_subdomain_or_preload_flags(self):
         s = self.loaded(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_SECURE_HSTS_SECONDS="0")
@@ -837,9 +863,9 @@ class CrossCheckTests(TestCase):
 
 
 class CurrentYearTests(SimpleTestCase):
-    """The "this year" limits follow the calendar while the server keeps running."""
+    """The "this year" limits follow the calendar without mutating the shared spec."""
 
-    def test_limits_move_forward_on_new_year(self):
+    def test_limits_move_forward_on_new_year_without_mutating_the_shared_spec(self):
         from datetime import date
         from unittest import mock
         from . import formspec
@@ -850,16 +876,16 @@ class CurrentYearTests(SimpleTestCase):
                 return date(date.today().year + 1, 1, 1)
 
         this_year = date.today().year
-        try:
-            with mock.patch.object(formspec, "date", NextYear):
-                answers = {**valid_answers(), "year_built": this_year + 1}
-                clean, errors = formspec.validate(answers)
-                self.assertEqual(errors, [])
-                spec = formspec.public_spec()
-                year_built = next(f for s in spec["sections"] for f in s["fields"] if f["id"] == "year_built")
-                self.assertEqual(year_built["max"], this_year + 1)
-        finally:
-            formspec._sync_current_year()  # back to the real year for the other tests
-        self.assertEqual(FIELD_BY_ID["year_built"]["max"], this_year)
+        original_max = FIELD_BY_ID["year_built"]["max"]
+        with mock.patch.object(formspec, "date", NextYear):
+            answers = {**valid_answers(), "year_built": this_year + 1}
+            clean, errors = formspec.validate(answers)
+            self.assertEqual(errors, [])
+            spec = formspec.public_spec()
+            year_built = next(f for s in spec["sections"] for f in s["fields"] if f["id"] == "year_built")
+            self.assertEqual(year_built["max"], this_year + 1)
+            # The per-request copy must not leak into the module-level definition.
+            self.assertEqual(FIELD_BY_ID["year_built"]["max"], original_max)
+        self.assertEqual(FIELD_BY_ID["year_built"]["max"], original_max)
         clean, errors = formspec.validate({**valid_answers(), "year_built": this_year + 1})
         self.assertIn("year_built", [e["field"] for e in errors])

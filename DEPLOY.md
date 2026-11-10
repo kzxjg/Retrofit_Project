@@ -40,11 +40,12 @@ browser ──https──▶ CloudFront ─┬─ /api/*  ──https──▶ A
 Holds the rate-limit counts so that every task shares one allowance per visitor.
 
 - Turn on in-transit encryption and set `DJANGO_REDIS_URL=rediss://<endpoint>:6379/0`
-  (production refuses `redis://`).
-- If the cache is unreachable, requests are let through without a limit and an
-  error is logged, so a cache outage does not take the tool down.
-- Without `DJANGO_REDIS_URL`, each process counts on its own, and
-  `python manage.py check --deploy` warns (`recommendations.W001`).
+  (production refuses `redis://` and refuses to start without a shared cache).
+- If the cache is unreachable, a circuit breaker opens after three failures and
+  each process applies a local fallback limit, so an outage degrades the limit
+  instead of removing it. Errors are logged.
+- `python manage.py check --deploy` warns (`recommendations.W001`) only for a
+  development-style LocMem cache.
 
 ## 3. API: image, task and load balancer
 
@@ -61,11 +62,16 @@ Task definition environment (see `.env.example` for all of them):
 | `DJANGO_SECRET_KEY` | From Secrets Manager. At least 50 random characters. |
 | `DJANGO_ALLOWED_HOSTS` | The public address: `d1234abcd.cloudfront.net` for now, later also your domain. Required. |
 | `DJANGO_DB_NAME`, `_USER`, `_HOST`, `_PASSWORD` | The RDS database |
-| `DJANGO_REDIS_URL` | `rediss://…` |
-| `DJANGO_TRUSTED_PROXY_COUNT` | `1` behind an ALB (the image default); `2` behind CloudFront + ALB |
+| `DJANGO_REDIS_URL` | `rediss://…` (required) |
+| `DJANGO_TRUST_PROXY_HEADERS` | `1` behind the ALB. Required: with `0` every request is redirected to HTTPS forever. |
+| `DJANGO_TRUSTED_PROXY_COUNT` | `2` behind CloudFront + ALB. Required: with `0` every visitor shares one rate-limit allowance. |
+| `DJANGO_ORIGIN_VERIFY_SECRET` | From Secrets Manager. CloudFront adds it as `X-Origin-Verify`. |
 | `GUNICORN_WORKERS` | About 2 × vCPUs + 1 (default 3) |
 
-The image already sets `DJANGO_DEBUG=0` and `DJANGO_TRUST_PROXY_HEADERS=1`.
+The image already sets `DJANGO_DEBUG=0`. It trusts no proxy by default
+(`DJANGO_TRUST_PROXY_HEADERS=0`, `DJANGO_TRUSTED_PROXY_COUNT=0`), so that run on
+its own a client cannot forge its address; the two rows above turn trust on
+for this deployment.
 
 Target group:
 
@@ -104,8 +110,13 @@ CloudFront distribution:
     `Host` header and `CloudFront-Forwarded-Proto`). Without
     the Host header, Django sees the ALB's own name and answers 400.
   - Allowed methods: GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE.
+  - Add an origin request header `X-Origin-Verify: <DJANGO_ORIGIN_VERIFY_SECRET>`
+    (CloudFront custom header, value from Secrets Manager).
 - Add the security headers as a response headers policy, including the same
-  Content-Security-Policy the build puts in `index.html` plus `frame-ancestors 'none'`.
+  Content-Security-Policy the build puts in `index.html` plus `frame-ancestors 'none'`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and HSTS.
+- Put an AWS WAF rate-based rule on the distribution as an independent second
+  layer, so an attacker cannot use up the application's per-IP allowance.
 
 **Lock the ALB to CloudFront.** With a VPC origin (below) the ALB is internal and
 only CloudFront can reach it. With a public ALB, allow inbound 443 on its security
@@ -114,7 +125,8 @@ group only from the AWS-managed prefix list
 CloudFront may reach the ALB: `DJANGO_TRUSTED_PROXY_COUNT=2` trusts the address
 CloudFront adds to `X-Forwarded-For`, and `CloudFront-Forwarded-Proto` is trusted
 as CloudFront's. Anyone reaching the ALB directly could write both themselves and
-dodge the rate limit.
+dodge the rate limit, so also require `X-Origin-Verify` (the app returns 403
+without it) and add an ALB listener rule that returns 403 when it is absent.
 
 ## Before there is a domain
 

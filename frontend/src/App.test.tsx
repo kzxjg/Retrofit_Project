@@ -220,28 +220,62 @@ describe('step 2: priorities', () => {
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/recommend')).toBe(false)
   })
 
-  it('goes back to step 1 when a home question still needs an answer', async () => {
+  it('is locked in the side panel until the home profile is complete', async () => {
     mockServer()
     render(<App />)
     await postalBox()
+    expect(step(/your priorities/i)).toBeDisabled()
+    expect(step(/your priorities/i)).toHaveAttribute('title', 'Complete your home profile first.')
     fireEvent.click(step(/your priorities/i))
-    type(screen.getByLabelText('Available retrofit budget (CAD)'), '30000')
-    type(screen.getByLabelText('What matters most to you?'), 'Balanced outcome')
-    fireEvent.click(button(/apply preferences/i))
     expect(screen.getByRole('heading', { name: '1. Tell us about your home' })).toBeInTheDocument()
-    expect(await postalBox()).toHaveAccessibleDescription('Postal code / location is required.')
+    expect(screen.getByText('Complete each step to unlock the next.')).toBeInTheDocument()
+
+    await fillHome()
+    expect(step(/your priorities/i)).toBeEnabled()
+    fireEvent.click(step(/your priorities/i))
+    expect(screen.getByRole('heading', { name: '2. Set your budget and priorities' })).toBeInTheDocument()
+  })
+
+  it('locks again when a required home answer is cleared', async () => {
+    mockServer()
+    render(<App />)
+    await fillHome()
+    expect(step(/your priorities/i)).toBeEnabled()
+    type(areaBox(), '')
+    expect(step(/your priorities/i)).toBeDisabled()
+  })
+
+  it('stays locked while the home profile has a mistake, even with every question answered', async () => {
+    mockServer()
+    render(<App />)
+    await fillHome()
+    type(areaBox(), '5') // below the 30 m² minimum
+    expect(step(/your priorities/i)).toBeDisabled()
   })
 })
 
 describe('steps 3 to 5: the report', () => {
-  it('explains that the report steps need the answers first', async () => {
+  it('are locked in the side panel until a report has been made', async () => {
     mockServer()
     render(<App />)
+    const reportSteps = [/energy assessment/i, /recommendations/i, /results/i]
     await postalBox()
-    for (const name of [/energy assessment/i, /recommendations/i, /results/i]) {
-      fireEvent.click(step(name))
-      expect(screen.getByText('No report yet')).toBeInTheDocument()
+    for (const name of reportSteps) {
+      expect(step(name)).toBeDisabled()
+      expect(step(name)).toHaveAttribute('title', 'Complete your home profile first.')
     }
+    await fillHome()
+    for (const name of reportSteps) expect(step(name)).toHaveAttribute('title', 'Set your budget and priorities first.')
+    fireEvent.click(button(/continue to priorities/i))
+    type(screen.getByLabelText('Available retrofit budget (CAD)'), '30000')
+    type(screen.getByLabelText('What matters most to you?'), 'Balanced outcome')
+    for (const name of reportSteps) {
+      expect(step(name)).toBeDisabled()
+      expect(step(name)).toHaveAttribute('title', 'Apply your preferences to create the report first.')
+    }
+    await apply()
+    for (const name of reportSteps) expect(step(name)).toBeEnabled()
+    expect(screen.queryByText('Complete each step to unlock the next.')).not.toBeInTheDocument()
   })
 
   it('shows the baseline the server worked out', async () => {

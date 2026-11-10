@@ -17,6 +17,7 @@ from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.utils import get_random_secret_key
 from django.utils.csp import CSP
+from django_ratelimit.core import _split_rate
 
 from .database import database_config
 
@@ -52,6 +53,28 @@ def _weak_secret_key(key):
 # Off unless asked for, so a deploy that forgets the variable is still safe. For local work set
 # DJANGO_DEBUG=1 (the .env file does, and so does .claude/launch.json).
 DEBUG = _env_bool("DJANGO_DEBUG", False)
+
+# A copied local .env must not silently disable every production guard inside a
+# container. Development convenience (DEBUG) and production posture are separate.
+_AWS_RUNTIME_VARS = (
+    "AWS_EXECUTION_ENV",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
+    "AWS_APP_RUNNER_ENVIRONMENT",
+)
+# The image itself sets DJANGO_IN_CONTAINER=1 (Dockerfile), so the guard holds on
+# any host that runs it, not only on AWS; the AWS variables also cover an image
+# built some other way.
+_IN_CONTAINER = _env_bool("DJANGO_IN_CONTAINER", False) or any(
+    os.environ.get(name) for name in _AWS_RUNTIME_VARS
+)
+if DEBUG and _IN_CONTAINER:
+    if not _env_bool("DJANGO_ALLOW_DEBUG_IN_CONTAINER", False):
+        raise ImproperlyConfigured(
+            "DJANGO_DEBUG=1 is refused inside a container because it turns off "
+            "ALLOWED_HOSTS, TLS and HSTS checks, secure cookies and safe error pages. "
+            "Set DJANGO_ALLOW_DEBUG_IN_CONTAINER=1 only for a deliberate debugging task."
+        )
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
@@ -96,11 +119,9 @@ CSRF_TRUSTED_ORIGINS = [
 
 # Application definition
 
+# No accounts, sessions or messages exist. Keeping those apps installed would add
+# tables, middleware and cookie surface for no feature.
 INSTALLED_APPS = [
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
     'django.contrib.staticfiles',
     'recommendations',
 ]
@@ -111,11 +132,10 @@ MIDDLEWARE = [
     'django.middleware.csp.ContentSecurityPolicyMiddleware',
     # Must stay above CommonMiddleware (the host check); see config/health.py.
     'config.health.HealthCheckMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
+    # Health checks return above this line, so an ALB can still check the task.
+    'config.origin_verify.OriginVerifyMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -142,12 +162,34 @@ SECURE_CSP = {
 
 # Per-IP limit on POST /api/recommend (django-ratelimit). Counts live in the
 # default cache (below).
-RECOMMEND_RATE_LIMIT = os.environ.get('DJANGO_RECOMMEND_RATE_LIMIT', '30/m')
+RECOMMEND_RATE_LIMIT = os.environ.get('DJANGO_RECOMMEND_RATE_LIMIT', '').strip() or '30/m'
+# Checked here because a rate django-ratelimit cannot read makes it fail on every request, and
+# views.over_rate_limit() would then let everything through as if the cache were down.
+# Format: requests/period, e.g. 30/m, 500/h or 10/5m (s, m, h or d). A zero multiplier
+# (30/0m) must be refused too: django-ratelimit treats "0" as a truthy multiplier and
+# computes ts % 0, which raises ZeroDivisionError on every request.
+_RATE_RE = re.compile(r'[1-9][0-9]*/([1-9][0-9]*)?[smhd]')
+if not _RATE_RE.fullmatch(RECOMMEND_RATE_LIMIT):
+    raise ImproperlyConfigured(
+        "DJANGO_RECOMMEND_RATE_LIMIT must look like 30/m: a number of requests of 1 or more, "
+        "a slash, then s, m, h or d (optionally with a number first, as in 10/5m)."
+    )
+try:
+    _rate_count, _rate_seconds = _split_rate(RECOMMEND_RATE_LIMIT)
+except Exception as exc:  # django-ratelimit's parser changed or rejected the string
+    raise ImproperlyConfigured(
+        "DJANGO_RECOMMEND_RATE_LIMIT is not a rate django-ratelimit can read."
+    ) from exc
+if _rate_count < 1 or _rate_seconds < 1:
+    raise ImproperlyConfigured(
+        "DJANGO_RECOMMEND_RATE_LIMIT must allow at least one request in a period longer than zero."
+    )
 
-# The cache holds the rate-limit counts. Without DJANGO_REDIS_URL it is each
-# process's own memory, so with N processes a visitor gets N times the limit;
-# `check --deploy` warns about that. On AWS, point it at ElastiCache (Redis or
-# Valkey). Production requires rediss:// (TLS), as it requires TLS to the database.
+# The cache holds the rate-limit counts. On AWS, point it at ElastiCache (Redis
+# or Valkey). Production requires a shared rediss:// cache (TLS): per-process
+# memory would multiply the limit by the number of workers and reset it on every
+# recycle, so startup fails instead. Local development may use plain redis:// or
+# no cache at all; `check --deploy` warns about the latter.
 REDIS_URL = os.environ.get('DJANGO_REDIS_URL', '').strip()
 if REDIS_URL:
     if not REDIS_URL.startswith(('redis://', 'rediss://')):
@@ -159,11 +201,20 @@ if REDIS_URL:
             'BACKEND': 'django.core.cache.backends.redis.RedisCache',
             'LOCATION': REDIS_URL,
             'KEY_PREFIX': 'retrofit',
-            # Give up quickly if Redis is unreachable instead of holding the request open.
-            'OPTIONS': {'socket_connect_timeout': 2, 'socket_timeout': 2},
+            # Give up quickly if Redis is unreachable instead of holding a sync worker
+            # open for seconds per request. The local fallback in views.py then limits
+            # traffic per process until Redis recovers.
+            'OPTIONS': {'socket_connect_timeout': 0.25, 'socket_timeout': 0.25},
         },
     }
 else:
+    if not DEBUG:
+        # Per-process LocMem counts multiply the effective limit by the number of
+        # workers and reset on every recycle, so production must fail closed.
+        raise ImproperlyConfigured(
+            "DJANGO_REDIS_URL must be set when DJANGO_DEBUG is false: rate-limit "
+            "counts must be shared by every worker and container."
+        )
     CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
 
 # How many trusted proxies sit in front of Django and append to X-Forwarded-For.
@@ -195,6 +246,17 @@ if not DEBUG:
                 "DJANGO_PROXY_SSL_HEADER must be X-Forwarded-Proto or CloudFront-Forwarded-Proto."
             )
         SECURE_PROXY_SSL_HEADER = ('HTTP_' + _proto_header.upper().replace('-', '_'), 'https')
+
+# A secret CloudFront adds to every origin request. When set, requests without
+# it are refused before reaching a view, so a client that reaches the ALB
+# directly cannot forge X-Forwarded-For or CloudFront-Forwarded-Proto. The
+# health check is answered before this middleware and needs no secret.
+ORIGIN_VERIFY_SECRET = os.environ.get('DJANGO_ORIGIN_VERIFY_SECRET', '').strip()
+if ORIGIN_VERIFY_SECRET and len(ORIGIN_VERIFY_SECRET) < 16:
+    raise ImproperlyConfigured(
+        "DJANGO_ORIGIN_VERIFY_SECRET must be at least 16 random characters."
+    )
+ORIGIN_VERIFY_HEADER = 'X-Origin-Verify'
 
 
 # Logging: everything goes to standard output, where ECS, App Runner and
@@ -231,8 +293,6 @@ TEMPLATES = [
         'OPTIONS': {
             'context_processors': [
                 'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
             ],
         },
     },
@@ -249,25 +309,6 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': database_config(os.environ, DEBUG, BASE_DIR),
 }
-
-
-# Password validation
-# https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
-
-AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
-]
 
 
 # Internationalization
