@@ -65,7 +65,7 @@ Task definition environment (see `.env.example` for all of them):
 | `DJANGO_REDIS_URL` | `rediss://…` (required) |
 | `DJANGO_TRUST_PROXY_HEADERS` | `1` behind the ALB. Required: with `0` every request is redirected to HTTPS forever. |
 | `DJANGO_TRUSTED_PROXY_COUNT` | `2` behind CloudFront + ALB. Required: with `0` every visitor shares one rate-limit allowance. |
-| `DJANGO_ORIGIN_VERIFY_SECRET` | From Secrets Manager. CloudFront adds it as `X-Origin-Verify`. |
+| `DJANGO_ORIGIN_VERIFY_SECRET` | From Secrets Manager. CloudFront adds it as `X-Origin-Verify`. Required: with the two rows above set and this empty, the app refuses to start. |
 | `GUNICORN_WORKERS` | About 2 × vCPUs + 1 (default 3) |
 
 The image already sets `DJANGO_DEBUG=0`. It trusts no proxy by default

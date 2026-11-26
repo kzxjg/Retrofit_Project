@@ -150,12 +150,23 @@ describe('step 1: home profile', () => {
     expect(screen.getByRole('heading', { name: '1. Tell us about your home' })).toBeInTheDocument()
   })
 
-  it('chooses the climate zone from the map', async () => {
+  it('shows the zones in a legend, and the map only marks the zone chosen from the list', async () => {
     mockServer()
     const { container } = render(<App />)
     await postalBox()
+    const legend = screen.getByRole('list', { name: 'Climate zones' })
+    expect(within(legend).getByText('Zone 4')).toBeInTheDocument()
+    expect(within(legend).getByText('Zone 8')).toBeInTheDocument()
+
+    // clicking the map chooses nothing
     fireEvent.click(container.querySelector('[data-zone="zone4"]')!)
-    expect(zoneBox()).toHaveValue(ZONE_A)
+    expect(zoneBox()).toHaveValue('')
+    expect(container.querySelector('.cm-zone--on')).toBeNull()
+
+    type(zoneBox(), ZONE_A)
+    expect(container.querySelector('.cm-zone--on')).toHaveAttribute('data-zone', 'zone4')
+    expect(container.querySelector('[data-legend-zone="zone4"]')).toHaveClass('cm-key--on')
+    expect(within(legend).getByText(/your zone/)).toBeInTheDocument()
   })
 
   it('previews the matched archetype from the year and building form', async () => {

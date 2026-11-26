@@ -27,4 +27,8 @@ describe('zoneAreas', () => {
     expect(ZONE_AREAS_NOTE.length).toBeGreaterThan(20)
     if (ZONE_AREAS_SOURCE === 'approximate') expect(ZONE_AREAS_NOTE.toLowerCase()).toContain('approximate')
   })
+
+  it('gives every zone a heating degree-day range for the legend', () => {
+    for (const zone of ZONE_AREAS) expect(zone.hdd, zone.id).toMatch(/HDD/)
+  })
 })

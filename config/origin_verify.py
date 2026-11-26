@@ -14,7 +14,8 @@ class OriginVerifyMiddleware:
     The ALB health check is answered by HealthCheckMiddleware, which runs
     earlier, so it does not need the secret. When no secret is configured the
     middleware is a no-op, which keeps local development and direct deployments
-    working.
+    working. Production settings refuse to start with proxy headers trusted and
+    no secret (config/settings.py), so that no-op cannot happen by accident.
     """
 
     def __init__(self, get_response):

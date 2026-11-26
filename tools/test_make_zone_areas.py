@@ -60,11 +60,12 @@ def read_areas(path):
     """The id, label, label position and path of every zone area in a written zoneAreas.ts."""
     text = Path(path).read_text(encoding="utf-8")
     entries = re.findall(
-        r'\{ id: ("[^"]+"), label: ("[^"]+"), lx: ([-\d.]+), ly: ([-\d.]+),\n    d: ("[^"]*") \},', text)
+        r'\{ id: ("[^"]+"), label: ("[^"]+"), hdd: ("[^"]+"), lx: ([-\d.]+), ly: ([-\d.]+),\n    d: ("[^"]*") \},', text)
     source = re.search(r"ZONE_AREAS_SOURCE: 'approximate' \| 'real' = (\"\w+\")", text)
     return text, json.loads(source.group(1)) if source else None, [
-        {"id": json.loads(i), "label": json.loads(label), "lx": float(lx), "ly": float(ly), "d": json.loads(d)}
-        for i, label, lx, ly, d in entries
+        {"id": json.loads(i), "label": json.loads(label), "hdd": json.loads(hdd), "lx": float(lx), "ly": float(ly),
+         "d": json.loads(d)}
+        for i, label, hdd, lx, ly, d in entries
     ]
 
 
@@ -102,6 +103,7 @@ class MakeZoneAreasTests(unittest.TestCase):
                             f"label of {area['id']} is outside the map")
             zone = next(z for z in ZONES if z["id"] == area["id"])
             self.assertEqual(area["label"], zone["name"].replace("Zone ", ""))
+            self.assertEqual(area["hdd"], make_zone_areas.hdd_range(zone))
 
     def test_approximate_areas_are_written_for_every_zone_with_a_known_city(self):
         text, source, areas = self.run_tool()
@@ -134,6 +136,19 @@ class MakeZoneAreasTests(unittest.TestCase):
 
         _, _, areas = self.run_tool("--hot2000", hot2000, "--hdd-field", "ANNUAL")
         self.assertEqual(len(areas), len(ZONES))
+
+    def test_hdd_ranges_read_like_the_legend(self):
+        by_id = {z["id"]: make_zone_areas.hdd_range(z) for z in ZONES}
+        self.assertEqual(by_id["zone4"], "under 3000 HDD")
+        self.assertEqual(by_id["zone5"], "3000–3999 HDD")
+        self.assertEqual(by_id["zone8"], "7000 HDD or more")
+
+    def test_the_committed_map_follows_the_necb_bands(self):
+        _, source, areas = read_areas(REPO / "frontend/src/zoneAreas.ts")
+        if source == "approximate":
+            self.skipTest("the committed map only follows the nearest city")
+        y = {a["id"]: a["ly"] for a in areas}
+        self.assertLess(y["zone8"], y["zone7b"], "zone 8 is the far north")
 
     def test_the_file_it_writes_has_the_shape_the_page_imports(self):
         text, _, _ = self.run_tool()

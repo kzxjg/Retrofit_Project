@@ -1,0 +1,44 @@
+# Settings for idftool.py and read_idf.py. Relative paths are relative to this file.
+# Use another file with:  python idftool.py --config other.toml baseline
+
+[paths]
+input_idf = "idf_files/input_idf"            # IDFs to simulate / retrofit
+output_idf = "idf_files/output_idf"          # retrofit variants are written here
+baseline_runs = "idf_files/baseline_runs"    # one EnergyPlus output folder per IDF
+baseline_results = "idf_files/baseline_results.csv"
+weather = "weather/baseline"                 # EPW folder; must hold a stations.csv index
+stations_file = "stations.csv"               # station index, inside the weather folder
+downloads = "downloads"                      # match_weather.py copies each IDF + its EPW into a subfolder here
+download_prefix = "test"                     # those subfolders are numbered: test1, test2, ...
+
+[weather]
+# A house further than this from every station is still simulated, but flagged in the results.
+far_station_km = 50
+
+[energyplus]
+# EnergyPlus install folder (holding energyplus.exe and Energy+.idd). The ENERGYPLUS_DIR environment
+# variable overrides this. Leave both empty to use the newest install matching a search pattern.
+dir = ""
+search = ["/usr/local/EnergyPlus-*", "/opt/EnergyPlus*", "/Applications/EnergyPlus-*", "C:/EnergyPlusV*"]
+
+# Retrofit measures. Each sets `fields` on every `object` of that EnergyPlus type, or only on the
+# ones called `name` if given. Every combination of measures is written (2^n - 1 files per IDF).
+# Theoretical data, to be updated.
+[[retrofits]]
+key = "R1"
+description = "Wall insulation"
+object = "MATERIAL"
+name = "Wall Insulation"
+fields = { Conductivity = 0.025, Thickness = 0.15 }
+
+[[retrofits]]
+key = "R2"
+description = "Windows"
+object = "WINDOWMATERIAL:SIMPLEGLAZINGSYSTEM"
+fields = { UFactor = 1.2, Solar_Heat_Gain_Coefficient = 0.4 }
+
+[[retrofits]]
+key = "R3"
+description = "Lighting"
+object = "LIGHTS"
+fields = { Watts_per_Zone_Floor_Area = 6.0 }

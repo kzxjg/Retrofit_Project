@@ -196,40 +196,33 @@ test('advanced mode sends the slider weights', async ({ page }) => {
   expect(sent.answers.weights.payback).toBe(90)
 })
 
-/** Clicks a zone on the map with the real mouse, at a point where that zone is what the visitor sees. */
-async function clickZone(page: Page, zoneId: string) {
-  const point = await page.evaluate((id) => {
-    const path = document.querySelector(`path[data-zone="${id}"]`)!
-    const box = path.getBoundingClientRect()
-    for (let fy = 0.1; fy < 1; fy += 0.05) {
-      for (let fx = 0.1; fx < 1; fx += 0.05) {
-        const x = box.left + box.width * fx
-        const y = box.top + box.height * fy
-        if (document.elementFromPoint(x, y) === path) return { x, y }
-      }
-    }
-    return null
-  }, zoneId)
-  expect(point, `no visible, clickable point on ${zoneId}`).not.toBeNull()
-  await page.mouse.click(point!.x, point!.y)
-}
-
-test('clicking a zone on the map chooses it', async ({ page }) => {
+test('the map is not clickable, and marks the zone chosen from the list', async ({ page }) => {
   await page.goto('/')
   await page.locator('.cm-svg').scrollIntoViewIfNeeded()
-  for (const zone of ['zone8', 'zone4', 'zone6']) {
-    await clickZone(page, zone)
-    await expect(page.locator('#f-zone')).toHaveValue(new RegExp(`^Zone ${zone.slice(4).toUpperCase()}:`))
-    await expect(page.locator(`path[data-zone="${zone}"]`)).toHaveClass(/cm-zone--on/)
-  }
+  await expect(page.getByRole('list', { name: 'Climate zones' }).getByRole('listitem')).toHaveCount(
+    await page.locator('path[data-zone]').count(),
+  )
+  const zone6 = page.locator('path[data-zone="zone6"]')
+  const box = (await zone6.boundingBox())!
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await expect(page.locator('#f-zone')).toHaveValue('')
+
+  const zoneBox = page.locator('#f-zone')
+  const option = await zoneBox.locator('option', { hasText: /^Zone 6:/ }).textContent()
+  await zoneBox.selectOption({ label: option! })
+  await expect(zone6).toHaveClass(/cm-zone--on/)
+  await expect(page.locator('[data-legend-zone="zone6"]')).toHaveClass(/cm-key--on/)
 })
 
-test('a zone clicked on the map that does not fit the postal code is reported and blocks the next step', async ({ page }) => {
+test('a zone that does not fit the postal code is reported and blocks the next step', async ({ page }) => {
   await page.goto('/')
   await fillSection(page, (await realSpec(page)).sections[0].fields)
-  await page.locator('#f-postal_code').fill('C1A 1A1') // Prince Edward Island: never zone 8
-  await page.locator('.cm-svg').scrollIntoViewIfNeeded()
-  await clickZone(page, 'zone8')
+  // The list only offers zones that fit the postal code, so choose zone 8 first (it occurs in
+  // Ontario) and then move the home to Prince Edward Island, which is never zone 8.
+  const zoneBox = page.locator('#f-zone')
+  const option = await zoneBox.locator('option', { hasText: /^Zone 8:/ }).textContent()
+  await zoneBox.selectOption({ label: option! })
+  await page.locator('#f-postal_code').fill('C1A 1A1')
   await expect(page.getByText(/does not occur where your postal code is/i).first()).toBeVisible()
   await page.getByRole('button', { name: /continue to priorities/i }).click()
   await expect(page.locator('#f-zone')).toBeFocused()

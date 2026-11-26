@@ -270,8 +270,15 @@ class CacheSettingsTests(SimpleTestCase):
         )
         self.assertNotIn("recommendations.W002", result.stdout + result.stderr)
 
-    def test_deploy_check_warns_when_proxy_headers_have_no_origin_secret(self):
+    def test_proxy_headers_without_an_origin_secret_stop_startup(self):
         result = self.deploy_check(DJANGO_ORIGIN_VERIFY_SECRET="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DJANGO_ORIGIN_VERIFY_SECRET must be set", result.stderr)
+
+    def test_deploy_check_still_warns_when_the_origin_secret_is_opted_out(self):
+        result = self.deploy_check(
+            DJANGO_ORIGIN_VERIFY_SECRET="", DJANGO_ALLOW_PROXY_TRUST_WITHOUT_ORIGIN_SECRET="1"
+        )
         self.assertIn("recommendations.W003", result.stdout + result.stderr)
 
 

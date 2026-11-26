@@ -5,7 +5,7 @@ import CanadaMap from './CanadaMap'
 import FieldControl from './FieldControl'
 import { allFields, arrangePackages, buildPayload, decadeLabel, fieldIssue, initialAnswers, isEmpty, isVisible, validate } from './formLogic'
 import { BaselineStep, RecommendationsStep, ResultsStep } from './ReportSteps'
-import { optionForZoneId, zoneIdFromOption } from './zones'
+import { zoneIdFromOption } from './zones'
 import type { Answer, Answers, ApiError, BudgetFilter, Field, Report, SortMode, Spec } from './types'
 import './App.css'
 
@@ -75,12 +75,6 @@ export default function App() {
   function changeField(id: string, value: Answer) {
     setServerErrors((prev) => (prev.some((e) => e.field === id) ? prev.filter((e) => e.field !== id) : prev))
     setAnswers((prev) => ({ ...prev, [id]: value }))
-  }
-
-  function chooseOnMap(zoneId: string) {
-    const options = spec ? allFields(spec).find((f) => f.id === 'zone')?.options : undefined
-    const option = options ? optionForZoneId(options, zoneId) : undefined
-    if (option) changeField('zone', option)
   }
 
   const header = (
@@ -268,7 +262,7 @@ export default function App() {
           </p>
           <div className="pg-grid2">{homeFields.map(control)}</div>
           <div className="pg-map-block">
-            <CanadaMap selectedZoneId={selectedZoneId} onSelectZone={chooseOnMap}>
+            <CanadaMap selectedZoneId={selectedZoneId}>
               {mapFields.map(control)}
             </CanadaMap>
           </div>

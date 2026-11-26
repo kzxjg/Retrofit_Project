@@ -12,6 +12,11 @@ zone lists in recommendations/formspec.py. This is an illustration, not a bounda
 REAL areas: the HOT2000 climate map holds many small areas, each with an annual HDD18
 value. Each area goes into the zone whose range contains its value, and the areas of one
 zone are joined together. Save the map as GeoJSON in latitude/longitude (EPSG:4326).
+The map is open data (Open Government Licence - Canada):
+https://open.canada.ca/data/en/dataset/4672733b-bbb6-4299-a57f-f19ab475ac11
+It has 403 areas and the service returns at most 1000 per request, so one request gets all:
+
+    curl -o zones.geojson "https://maps-cartes.services.geo.ca/server_serveur/rest/services/NRCan/Carte_climatique_HOT2000_Climate_Map_EN/MapServer/1/query?where=1%3D1&outFields=Name,Prov,HDD_Below_18C&outSR=4326&f=geojson"
 
 The zone ranges and the city lists come from recommendations/formspec.py, so change them there.
 """
@@ -138,6 +143,16 @@ def to_path(geom):
     return d, round((x - MINX) * SCALE, 1), round((MAXY - y) * SCALE, 1)
 
 
+def hdd_range(zone):
+    """The zone's heating degree-day range as the legend shows it, e.g. "3000–3999 HDD"."""
+    low, high = zone["hdd_min"], zone["hdd_max"]
+    if high is None:
+        return f"{low} HDD or more"
+    if not low:
+        return f"under {high} HDD"
+    return f"{low}–{high - 1} HDD"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hot2000", help="GeoJSON of the NRCan HOT2000 climate map (latitude/longitude)")
@@ -149,7 +164,8 @@ def main():
     if args.hot2000:
         areas = real_areas(args.hot2000, land, args.hdd_field)
         source = "real"
-        note = "Zone areas: NRCan HOT2000 climate map (Open Government Licence - Canada), grouped by zone."
+        note = ("Zone areas: NRCan HOT2000 Climate Map, grouped by heating degree-days into the NECB zones. "
+                "Contains information licensed under the Open Government Licence – Canada.")
     else:
         areas = approximate_areas(land)
         source = "approximate"
@@ -164,7 +180,9 @@ def main():
         geom = geom.simplify(5000, preserve_topology=True)
         d, lx, ly = to_path(geom)
         label = zone["name"].replace("Zone ", "")
-        lines.append(f'  {{ id: {json.dumps(zone["id"])}, label: {json.dumps(label)}, lx: {lx}, ly: {ly},\n    d: {json.dumps(d)} }},')
+        hdd = json.dumps(hdd_range(zone), ensure_ascii=False)
+        lines.append(f'  {{ id: {json.dumps(zone["id"])}, label: {json.dumps(label)}, hdd: {hdd}, lx: {lx}, ly: {ly},\n'
+                     f'    d: {json.dumps(d)} }},')
         print(f"{zone['id']:7} {geom.area / 1e6:12,.0f} km2")
 
     with open(OUT_FILE, "w", encoding="utf-8") as out:
@@ -182,6 +200,7 @@ HEADER = """\
 export type ZoneArea = {
   id: string // matches the zone id in recommendations/formspec.py, e.g. "zone7a"
   label: string
+  hdd: string // heating degree-day range, for the legend
   d: string // SVG path
   lx: number // label position
   ly: number

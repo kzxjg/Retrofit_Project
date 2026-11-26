@@ -697,7 +697,8 @@ class SettingsTests(SimpleTestCase):
         self.assertIsNone(s["SECURE_PROXY_SSL_HEADER"])  # forwarded headers are not trusted by default
 
     def test_forwarded_headers_are_trusted_only_when_asked(self):
-        s = self.loaded(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_TRUST_PROXY_HEADERS="1")
+        s = self.loaded(DJANGO_SECRET_KEY=STRONG_KEY, DJANGO_TRUST_PROXY_HEADERS="1",
+                        DJANGO_ORIGIN_VERIFY_SECRET="test-origin-verify-secret")
         self.assertEqual(s["SECURE_PROXY_SSL_HEADER"], ["HTTP_X_FORWARDED_PROTO", "https"])
 
     def test_allowed_hosts_are_split_and_trimmed(self):
@@ -731,7 +732,8 @@ class SettingsTests(SimpleTestCase):
                     self.assertIn("is not a hostname", result.stderr)
 
     def test_the_https_header_can_be_cloudfronts_until_there_is_a_domain(self):
-        trust = {"DJANGO_SECRET_KEY": STRONG_KEY, "DJANGO_TRUST_PROXY_HEADERS": "1"}
+        trust = {"DJANGO_SECRET_KEY": STRONG_KEY, "DJANGO_TRUST_PROXY_HEADERS": "1",
+                 "DJANGO_ORIGIN_VERIFY_SECRET": "test-origin-verify-secret"}
         for value, expected in (("", "HTTP_X_FORWARDED_PROTO"), ("X-Forwarded-Proto", "HTTP_X_FORWARDED_PROTO"),
                                 ("CloudFront-Forwarded-Proto", "HTTP_CLOUDFRONT_FORWARDED_PROTO"),
                                 ("cloudfront-forwarded-proto", "HTTP_CLOUDFRONT_FORWARDED_PROTO")):

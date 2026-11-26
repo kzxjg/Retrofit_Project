@@ -341,6 +341,17 @@ class QuotaBurnTests(TestCase):
         )
         self.assertFalse(_is_allowed_origin(request))
 
+    def test_an_origin_that_cannot_be_parsed_is_refused_not_crashed(self):
+        # urlparse() raises ValueError on these; uncaught, each was a 500 with a
+        # traceback in the log, ahead of the rate limit.
+        for origin in ("http://[", "http://[::1", "https://[zz]", "http://a]b"):
+            with self.subTest(origin=origin):
+                response = self.client.post(
+                    "/api/recommend", data={"answers": valid_answers()},
+                    content_type="application/json", HTTP_ORIGIN=origin,
+                )
+                self.assertEqual(response.status_code, 403)
+
     @override_settings(RATELIMIT_ENABLE=False)
     def test_same_origin_requests_are_accepted(self):
         response = self.client.post(
@@ -437,6 +448,30 @@ class OriginVerifyTests(TestCase):
     @override_settings(ORIGIN_VERIFY_SECRET="", RATELIMIT_ENABLE=False)
     def test_no_secret_configured_is_a_no_op_for_local_work(self):
         self.assertEqual(self.client.get("/api/form-spec").status_code, 200)
+
+    def test_production_refuses_proxy_trust_without_the_secret(self):
+        for env in (
+            {"DJANGO_TRUST_PROXY_HEADERS": "1", "DJANGO_TRUSTED_PROXY_COUNT": "0"},
+            {"DJANGO_TRUST_PROXY_HEADERS": "0", "DJANGO_TRUSTED_PROXY_COUNT": "1"},
+        ):
+            with self.subTest(env=env):
+                result = run_settings("import config.settings", DJANGO_ORIGIN_VERIFY_SECRET="", **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("DJANGO_ORIGIN_VERIFY_SECRET must be set", result.stderr)
+
+    def test_no_proxy_trust_needs_no_secret(self):
+        result = run_settings(
+            "import config.settings", DJANGO_ORIGIN_VERIFY_SECRET="",
+            DJANGO_TRUST_PROXY_HEADERS="0", DJANGO_TRUSTED_PROXY_COUNT="0",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+
+    def test_proxy_trust_without_the_secret_needs_an_explicit_opt_out(self):
+        result = run_settings(
+            "import config.settings", DJANGO_ORIGIN_VERIFY_SECRET="",
+            DJANGO_ALLOW_PROXY_TRUST_WITHOUT_ORIGIN_SECRET="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
 
     def test_a_short_secret_stops_startup(self):
         result = run_settings("import config.settings", DJANGO_ORIGIN_VERIFY_SECRET="short")

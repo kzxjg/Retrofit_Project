@@ -257,6 +257,23 @@ if ORIGIN_VERIFY_SECRET and len(ORIGIN_VERIFY_SECRET) < 16:
         "DJANGO_ORIGIN_VERIFY_SECRET must be at least 16 random characters."
     )
 ORIGIN_VERIFY_HEADER = 'X-Origin-Verify'
+# Trusting proxy headers without the secret lets anyone who reaches the app (or the
+# ALB) directly write X-Forwarded-For and the HTTPS header themselves, so production
+# refuses to start that way instead of only warning in `check --deploy` (W003).
+# The opt-out is for a topology where the network alone guarantees the path, such
+# as an ALB with no CloudFront whose tasks accept traffic only from that ALB.
+if (
+    not DEBUG
+    and not ORIGIN_VERIFY_SECRET
+    and (TRUSTED_PROXY_COUNT > 0 or globals().get('SECURE_PROXY_SSL_HEADER'))
+    and not _env_bool('DJANGO_ALLOW_PROXY_TRUST_WITHOUT_ORIGIN_SECRET', False)
+):
+    raise ImproperlyConfigured(
+        "DJANGO_ORIGIN_VERIFY_SECRET must be set when DJANGO_TRUST_PROXY_HEADERS=1 or "
+        "DJANGO_TRUSTED_PROXY_COUNT is above 0: without it a client that skips the proxy "
+        "can forge the headers the app trusts. If nothing but the trusted proxy can reach "
+        "the app, set DJANGO_ALLOW_PROXY_TRUST_WITHOUT_ORIGIN_SECRET=1 instead."
+    )
 
 
 # Logging: everything goes to standard output, where ECS, App Runner and

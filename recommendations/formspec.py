@@ -19,8 +19,8 @@ POSTAL_LETTERS = {
 # province falls in it) and exists to catch a postal code and zone that cannot belong together.
 # PLACEHOLDER: replace with the official province-by-zone table when it is available.
 PROVINCE_ZONES = {
-    "BC": ["zone4", "zone5", "zone6", "zone7a", "zone7b", "zone8"],  # zone8: far north (e.g. Atlin)
-    "AB": ["zone6", "zone7a", "zone7b", "zone8"],  # zone8: far north (e.g. High Level)
+    "BC": ["zone4", "zone5", "zone6", "zone7a", "zone7b", "zone8"],  
+    "AB": ["zone6", "zone7a", "zone7b", "zone8"], 
     "SK": ["zone7a", "zone7b", "zone8"],
     "MB": ["zone7a", "zone7b", "zone8"],
     "ON": ["zone5", "zone6", "zone7a", "zone7b", "zone8"],

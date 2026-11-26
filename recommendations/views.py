@@ -181,7 +181,6 @@ def _log_refusal(request, reason):
 
 
 def _is_allowed_origin(request):
-    """Reject obvious cross-site browser requests before they touch the counter."""
     if request.META.get("HTTP_SEC_FETCH_SITE", "").lower() == "cross-site":
         return False
     origin = request.META.get("HTTP_ORIGIN")
@@ -189,7 +188,10 @@ def _is_allowed_origin(request):
         return True
     if origin in settings.CSRF_TRUSTED_ORIGINS:
         return True
-    parsed = urlparse(origin)
+    try:
+        parsed = urlparse(origin)
+    except ValueError: 
+        return False
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return False
     try:
@@ -205,12 +207,6 @@ def _declared_too_large(request):
 
 
 def over_rate_limit(request):
-    """Counts this request and says whether the address is over its allowance.
-
-    A shared cache (Redis) is the primary counter. If it cannot be reached the
-    request is still limited by a per-process fallback after a short circuit
-    breaker opens; a cache outage is never treated as "unlimited".
-    """
     key = client_ip(RATE_GROUP, request)
     rate = settings.RECOMMEND_RATE_LIMIT
     if _circuit_is_open():
@@ -232,14 +228,8 @@ def over_rate_limit(request):
     return limited
 
 
-# No CSRF check: there are no logins or sessions, so a forged request could only ask for an
-# anonymous recommendation. Only JSON is accepted, and a browser will not send a cross-site JSON
-# POST without a CORS preflight, which this app does not answer.
-#
-# Order matters. The origin and content-type checks run before the rate-limit increment, so a
-# third-party page (which can pass neither) cannot burn a visitor's quota. Everything after them is
-# counted, and the count happens before the body is read, so large or malformed bodies are not
-# free work for whoever sends them.
+
+
 @csrf_exempt
 @require_POST
 def recommend(request):
